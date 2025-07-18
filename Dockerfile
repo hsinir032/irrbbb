@@ -23,6 +23,6 @@ COPY . .
 # Make the start script executable
 RUN chmod +x ./start.sh
 
-# Command to run the application
-# This will be overridden by the start.sh script in render.yaml
+# Command to run the application when the container starts
+# This explicitly tells Docker to execute start.sh
 CMD ["./start.sh"]
