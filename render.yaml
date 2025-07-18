@@ -5,14 +5,10 @@ services:
   # Web Service for your FastAPI Backend
   - type: web
     name: irrbb-backend
-    # REMOVED: env: python - Render will infer from Dockerfile
+    # Explicitly tell Render this is a Docker-based service
+    runtime: docker # <--- NEW LINE ADDED HERE
     
-    # Use Docker for building and running the service
     dockerfilePath: Dockerfile
-    
-    # The command to run the service inside the Docker container
-    # This will execute your start.sh script (as defined by CMD in Dockerfile)
-    # No need for a 'command' field here if CMD is in Dockerfile
     
     # Environment variables for your application
     envVars:
@@ -30,7 +26,7 @@ services:
   - type: pserv
     name: irrbb-postgres
     plan: free # Use 'free' for development, upgrade to 'starter' or 'pro' for production
-    # Environment variables for the PostgreSQL database (matching your main.py)
+    # No 'runtime' needed for pserv type, it's implicit
     envVars:
       - key: POSTGRES_USER
         value: irrbb_user
