@@ -5,13 +5,14 @@ services:
   # Web Service for your FastAPI Backend
   - type: web
     name: irrbb-backend
-    env: python
+    # REMOVED: env: python - Render will infer from Dockerfile
     
     # Use Docker for building and running the service
     dockerfilePath: Dockerfile
     
-    # REMOVED: The 'command' field is now removed.
-    # Render will use the CMD instruction from your Dockerfile instead.
+    # The command to run the service inside the Docker container
+    # This will execute your start.sh script (as defined by CMD in Dockerfile)
+    # No need for a 'command' field here if CMD is in Dockerfile
     
     # Environment variables for your application
     envVars:
