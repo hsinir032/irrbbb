@@ -5,28 +5,22 @@ services:
   # Web Service for your FastAPI Backend
   - type: web
     name: irrbb-backend
-    # Explicitly tell Render this is a Docker-based service
-    runtime: docker # <--- NEW LINE ADDED HERE
+    runtime: docker
     
     dockerfilePath: Dockerfile
     
-    # Environment variables for your application
     envVars:
       - key: DATABASE_URL
-        # This value will be automatically populated by Render from the PostgreSQL service below
-        # Make sure the database name matches what you set for POSTGRES_DB in the database service
         value: ${irrbb-postgres.internalConnectionString}?sslmode=disable
       - key: PYTHON_VERSION
-        value: 3.10.12 # Specify Python version for consistency
+        value: 3.10.12
 
-    # Health check for your service (optional but good practice)
     healthCheckPath: /
 
   # PostgreSQL Database Service
   - type: pserv
     name: irrbb-postgres
-    plan: free # Use 'free' for development, upgrade to 'starter' or 'pro' for production
-    # No 'runtime' needed for pserv type, it's implicit
+    plan: free
     envVars:
       - key: POSTGRES_USER
         value: irrbb_user
