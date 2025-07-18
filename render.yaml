@@ -6,19 +6,12 @@ services:
   - type: web
     name: irrbb-backend
     env: python
-    # A custom build command to ensure system dependencies are installed
-    # This is an alternative to putting apt-get in Dockerfile if you prefer
-    # Render's native build system. However, for full control, Dockerfile is better.
-    # We'll stick to Dockerfile for this example, so this is commented out.
-    # buildCommand: "pip install --no-cache-dir -r requirements.txt"
-    # startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
     
     # Use Docker for building and running the service
     dockerfilePath: Dockerfile
     
-    # The command to run the service inside the Docker container
-    # This will execute your start.sh script
-    command: "./start.sh"
+    # REMOVED: The 'command' field is now removed.
+    # Render will use the CMD instruction from your Dockerfile instead.
     
     # Environment variables for your application
     envVars:
