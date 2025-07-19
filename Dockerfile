@@ -5,8 +5,8 @@ FROM python:3.10-slim-buster
 WORKDIR /app
 
 # Install system dependencies needed for psycopg2-binary
-# These are often required for Python packages that interact with databases
-RUN apt-get update && apt-get install -y \
+# Ensure apt-get update is successful and use --no-install-recommends for smaller image
+RUN apt-get update --fix-missing && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     gcc \
     postgresql-client \
     && rm -rf /var/lib/apt/lists/*
