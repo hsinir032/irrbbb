@@ -21,15 +21,21 @@ app = FastAPI(
 )
 
 # --- CORS Configuration ---
-# Explicitly allow http://localhost:3000 for local frontend development
-# In a production environment, you would typically list your actual frontend domain(s)
-# instead of "*" or specific localhost.
+# Define allowed origins as a separate variable for clarity and debugging
+# Removed the general "*" to be more explicit, as it can sometimes be problematic
+# when combined with allow_credentials=True in certain environments.
+ALLOWED_ORIGINS = [
+    "http://localhost:3000", # Your local React development server
+    "https://irrbb-backend.onrender.com" # Your deployed Render backend URL
+    # Add any other specific frontend domains here if you deploy your frontend elsewhere
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "https://irrbb-backend.onrender.com", "*"], # Added localhost and backend URL
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["*"],
+    allow_headers=["*"], # Allow all headers
 )
 
 # --- Database Configuration ---
@@ -63,6 +69,8 @@ class Loan(Base):
 # For simplicity in this example, we'll call it on startup.
 @app.on_event("startup")
 def on_startup():
+    # Print the allowed origins to the Render logs for verification
+    print(f"DEBUG: FastAPI app starting up. Allowed CORS origins: {ALLOWED_ORIGINS}")
     Base.metadata.create_all(bind=engine)
     print("Database tables created/checked.")
     # Optional: Add some initial dummy data if the table is empty
