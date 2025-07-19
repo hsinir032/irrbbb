@@ -1,5 +1,6 @@
 # Use an official Python runtime as a parent image
-FROM python:3.10-slim-buster
+# Changed from buster to bullseye as buster repositories are archived
+FROM python:3.10-slim-bullseye
 
 # Set the working directory in the container
 WORKDIR /app
