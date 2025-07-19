@@ -26,7 +26,7 @@ app = FastAPI(
 # when combined with allow_credentials=True in certain environments.
 ALLOWED_ORIGINS = [
     "http://localhost:3000", # Your local React development server
-    "https://irrbb-backend.onrender.com" # Your deployed Render backend URL
+    "https://irrbbb-backend.onrender.com" # Your deployed Render backend URL
     # Add any other specific frontend domains here if you deploy your frontend elsewhere
 ]
 
