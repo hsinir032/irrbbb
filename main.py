@@ -120,6 +120,9 @@ MAX_SCENARIO_HISTORY = 10
 
 def generate_simulated_data(db: Session, total_loans_from_db: int) -> DashboardData:
     """Generates a new set of simulated IRRBB dashboard data."""
+    # Moved global declaration to the top of the function
+    global _scenario_history
+
     new_eve_sensitivity = round(random.uniform(-2.5, 2.5), 2)
     new_nii_sensitivity = round(random.uniform(-1.5, 1.5), 2)
 
@@ -146,8 +149,7 @@ def generate_simulated_data(db: Session, total_loans_from_db: int) -> DashboardD
     }
 
     _scenario_history.append(new_scenario_point)
-    global _scenario_history
-    _scenario_history = _scenario_history[-MAX_SCENARIO_HISTORY:]
+    _scenario_history = _scenario_history[-MAX_SCENARIO_HISTORY:] # This line requires `global` because it's re-assigning the name
 
     return DashboardData(
         eve_sensitivity=new_eve_sensitivity,
@@ -187,4 +189,3 @@ async def create_loan(loan: LoanCreate, db: Session = Depends(get_db)):
 @app.get("/")
 async def root():
     return {"message": "IRRBB Backend is running! Access /docs for API documentation."}
-
