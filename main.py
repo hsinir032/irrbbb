@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Generator
 import random
 import time
 from datetime import datetime, date
+import os # Import the 'os' module to access environment variables
 
 # --- SQLAlchemy Imports for Database ---
 from sqlalchemy import create_engine, Column, Integer, String, Float, Date
@@ -29,12 +30,10 @@ app.add_middleware(
 )
 
 # --- Database Configuration ---
-# Replace with your PostgreSQL connection details
-# If using Docker setup:
-# DATABASE_URL = "postgresql://irrbb_user:irrbb_password@localhost:5432/irrbb_db"
-# If using Nhost PostgreSQL (example, replace with your actual connection string from Nhost):
-# DATABASE_URL = "postgresql://<user>:<password>@<host>:<port>/<database_name>"
-DATABASE_URL = "postgresql://irrbb_user:irrbb_password@localhost:5432/irrbb_db" # Default local Docker
+# IMPORTANT: Read DATABASE_URL from environment variable first
+# This is how Render will provide the connection string to your PostgreSQL database.
+# If running locally without the env var, it will fall back to localhost (for Docker setup).
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://irrbb_user:irrbb_password@localhost:5432/irrbb_db")
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
