@@ -6,10 +6,24 @@ import random
 import os
 import pandas as pd # Still needed for pandas.isna in on_startup data generation
 
-# Import modules from your local project
-from .database import Base, engine, SessionLocal, get_db
-from . import models, schemas, crud, calculations # Import all new modules
-from .routers import dashboard, instruments # Import the API routers
+# Import modules using absolute paths (assuming project root is on PYTHONPATH)
+from database import Base, engine, SessionLocal, get_db
+from models import Loan, Deposit # Import specific models needed for startup
+from schemas import (
+    LoanBase, LoanCreate, LoanResponse,
+    DepositBase, DepositCreate, DepositResponse,
+    GapBucket, DashboardData # Import DashboardData for response_model
+)
+from crud import (
+    get_loan, get_loans, create_loan,
+    get_deposit, get_deposits, create_deposit
+)
+from calculations import (
+    get_bucket, calculate_nii_and_eve,
+    calculate_gap_analysis, generate_dashboard_data_from_db
+)
+from routers import dashboard, instruments # Import the API routers
+
 
 # --- FastAPI App Initialization ---
 app = FastAPI(
@@ -45,7 +59,7 @@ def on_startup():
     db = SessionLocal()
 
     # Populate Loans if table is empty
-    if db.query(models.Loan).count() == 0:
+    if db.query(Loan).count() == 0: # Use imported Loan model
         print("Adding initial dummy loan data...")
         current_date = date.today()
         dummy_loans = []
@@ -75,7 +89,7 @@ def on_startup():
                 interest_rate = None # Floating rates are calculated, not fixed
 
             dummy_loans.append(
-                models.Loan(
+                Loan( # Use imported Loan model
                     instrument_id=f"LOAN{i:03d}",
                     type=loan_type,
                     notional=notional,
@@ -93,7 +107,7 @@ def on_startup():
         print(f"{len(dummy_loans)} dummy loan data added.")
 
     # Populate Deposits if table is empty
-    if db.query(models.Deposit).count() == 0:
+    if db.query(Deposit).count() == 0: # Use imported Deposit model
         print("Adding initial dummy deposit data...")
         current_date = date.today()
         dummy_deposits = []
@@ -116,7 +130,7 @@ def on_startup():
                     next_repricing_date = current_date + timedelta(days=random.randint(0, 90))
 
             dummy_deposits.append(
-                models.Deposit(
+                Deposit( # Use imported Deposit model
                     instrument_id=f"DEP{i:03d}",
                     type=deposit_type,
                     balance=balance,
