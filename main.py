@@ -340,7 +340,7 @@ async def create_loan(loan: LoanCreate, db: Session = Depends(get_db)):
     db.refresh(db_loan)
     return db_loan
 
-@get("/api/v1/deposits", response_model=List[DepositResponse])
+@app.get("/api/v1/deposits", response_model=List[DepositResponse]) # CORRECTED: Changed @get to @app.get
 async def get_deposits(db: Session = Depends(get_db)):
     """Fetches all deposit instruments from the database."""
     deposits = db.query(Deposit).all()
