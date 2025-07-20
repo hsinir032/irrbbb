@@ -6,3 +6,4 @@ pydantic-settings==2.3.3
 # New database-related libraries:
 sqlalchemy==2.0.30 # For database ORM
 psycopg2-binary==2.9.9 # PostgreSQL adapter for Python
+pandas==2.2.2 # For data manipulation
