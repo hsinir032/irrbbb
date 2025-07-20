@@ -5,8 +5,9 @@ from typing import List, Dict, Any
 import pandas as pd
 from sqlalchemy.orm import Session
 
-# Import models and schemas from your local project
-from . import models, schemas
+# Corrected: Import models and schemas using absolute paths
+from models import Loan, Deposit
+from schemas import GapBucket, DashboardData
 
 # In-memory store for scenario history (for demonstration)
 _scenario_history: List[Dict[str, Any]] = []
@@ -44,8 +45,8 @@ def calculate_nii_and_eve(db: Session) -> Dict[str, Any]:
     based on data from the database.
     This is a simplified calculation for demonstration purposes.
     """
-    loans = db.query(models.Loan).all()
-    deposits = db.query(models.Deposit).all()
+    loans = db.query(Loan).all()
+    deposits = db.query(Deposit).all()
 
     # Convert to pandas DataFrames for easier calculation
     loans_df = pd.DataFrame([loan.__dict__ for loan in loans])
@@ -91,12 +92,12 @@ def calculate_nii_and_eve(db: Session) -> Dict[str, Any]:
     }
 
 
-def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
+def calculate_gap_analysis(db: Session) -> Dict[str, List[GapBucket]]:
     """
     Calculates NII Repricing Gap and EVE Maturity Gap.
     """
-    loans = db.query(models.Loan).all()
-    deposits = db.query(models.Deposit).all()
+    loans = db.query(Loan).all()
+    deposits = db.query(Deposit).all()
 
     loans_df = pd.DataFrame([loan.__dict__ for loan in loans])
     deposits_df = pd.DataFrame([deposit.__dict__ for deposit in deposits])
@@ -149,7 +150,7 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
         assets = nii_gap_data[bucket]["assets"]
         liabilities = nii_gap_data[bucket]["liabilities"]
         gap = assets - liabilities
-        nii_gap_results.append(schemas.GapBucket(bucket=bucket, assets=assets, liabilities=liabilities, gap=gap))
+        nii_gap_results.append(GapBucket(bucket=bucket, assets=assets, liabilities=liabilities, gap=gap))
 
     # --- EVE Maturity Gap Buckets (in days from today) ---
     eve_buckets_def = {
@@ -188,7 +189,7 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
         assets = eve_gap_data[bucket]["assets"]
         liabilities = eve_gap_data[bucket]["liabilities"]
         gap = assets - liabilities
-        eve_gap_results.append(schemas.GapBucket(bucket=bucket, assets=assets, liabilities=liabilities, gap=gap))
+        eve_gap_results.append(GapBucket(bucket=bucket, assets=assets, liabilities=liabilities, gap=gap))
 
     return {
         "nii_repricing_gap": nii_gap_results,
@@ -196,7 +197,7 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
     }
 
 
-def generate_dashboard_data_from_db(db: Session) -> schemas.DashboardData:
+def generate_dashboard_data_from_db(db: Session) -> DashboardData:
     """Generates dashboard data by fetching from DB and performing calculations."""
     global _scenario_history
 
@@ -226,7 +227,7 @@ def generate_dashboard_data_from_db(db: Session) -> schemas.DashboardData:
     _scenario_history.append(new_scenario_point)
     _scenario_history = _scenario_history[-MAX_SCENARIO_HISTORY:]
 
-    return schemas.DashboardData(
+    return DashboardData(
         eve_sensitivity=calculated_metrics["eve_sensitivity"],
         nii_sensitivity=calculated_metrics["nii_sensitivity"],
         portfolio_value=calculated_metrics["total_assets_value"],

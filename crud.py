@@ -3,22 +3,23 @@ from sqlalchemy.orm import Session
 from typing import List
 from datetime import date
 
-# Import models and schemas
-from . import models, schemas
+# Corrected: Import models and schemas using absolute paths
+from models import Loan, Deposit
+from schemas import LoanCreate, DepositCreate
 
 # --- CRUD Operations for Loans ---
 
 def get_loan(db: Session, loan_id: int):
     """Retrieve a single loan by its ID."""
-    return db.query(models.Loan).filter(models.Loan.id == loan_id).first()
+    return db.query(Loan).filter(Loan.id == loan_id).first()
 
-def get_loans(db: Session, skip: int = 0, limit: int = 100) -> List[models.Loan]:
+def get_loans(db: Session, skip: int = 0, limit: int = 100) -> List[Loan]:
     """Retrieve multiple loans with pagination."""
-    return db.query(models.Loan).offset(skip).limit(limit).all()
+    return db.query(Loan).offset(skip).limit(limit).all()
 
-def create_loan(db: Session, loan: schemas.LoanCreate) -> models.Loan:
+def create_loan(db: Session, loan: LoanCreate) -> Loan:
     """Create a new loan in the database."""
-    db_loan = models.Loan(**loan.model_dump())
+    db_loan = Loan(**loan.model_dump())
     db.add(db_loan)
     db.commit()
     db.refresh(db_loan)
@@ -28,15 +29,15 @@ def create_loan(db: Session, loan: schemas.LoanCreate) -> models.Loan:
 
 def get_deposit(db: Session, deposit_id: int):
     """Retrieve a single deposit by its ID."""
-    return db.query(models.Deposit).filter(models.Deposit.id == deposit_id).first()
+    return db.query(Deposit).filter(Deposit.id == deposit_id).first()
 
-def get_deposits(db: Session, skip: int = 0, limit: int = 100) -> List[models.Deposit]:
+def get_deposits(db: Session, skip: int = 0, limit: int = 100) -> List[Deposit]:
     """Retrieve multiple deposits with pagination."""
-    return db.query(models.Deposit).offset(skip).limit(limit).all()
+    return db.query(Deposit).offset(skip).limit(limit).all()
 
-def create_deposit(db: Session, deposit: schemas.DepositCreate) -> models.Deposit:
+def create_deposit(db: Session, deposit: DepositCreate) -> Deposit:
     """Create a new deposit in the database."""
-    db_deposit = models.Deposit(**deposit.model_dump())
+    db_deposit = Deposit(**deposit.model_dump())
     db.add(db_deposit)
     db.commit()
     db.refresh(db_deposit)

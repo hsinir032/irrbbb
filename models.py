@@ -1,9 +1,8 @@
 # models.py
 from sqlalchemy import Column, Integer, String, Float, Date
-from sqlalchemy.ext.declarative import declarative_base
 
-# Import Base from your database.py
-from .database import Base
+# Corrected: Import Base using absolute path
+from database import Base
 
 # --- Database Models ---
 class Loan(Base):
