@@ -2,12 +2,12 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Any, Generator, Optional
+from typing import List, Dict, Any, Generator
 import random
 import time
-from datetime import datetime, date, timedelta
-import os
-import pandas as pd
+from datetime import datetime, date, timedelta # Added timedelta
+import os # Import the 'os' module to access environment variables
+import pandas as pd # Import pandas
 
 # --- SQLAlchemy Imports for Database ---
 from sqlalchemy import create_engine, Column, Integer, String, Float, Date
@@ -29,8 +29,9 @@ app = FastAPI(
 )
 
 # --- CORS Configuration ---
+# Define allowed origins as a separate variable for clarity and debugging
 ALLOWED_ORIGINS = [
-    "http://localhost:3000",
+    "http://localhost:3000", # Your local React development server
     "https://irrbbb-backend.onrender.com" # Your deployed Render backend URL
 ]
 
@@ -38,8 +39,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], # Explicitly allow OPTIONS for preflight requests
+    allow_headers=["*"], # Allow all headers
 )
 
 # --- Database Configuration ---
