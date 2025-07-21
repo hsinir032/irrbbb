@@ -296,4 +296,4 @@ def calculate_nii_and_eve(db: Session) -> Dict[str, Any]:
         "total_deposits": len(deposits),
         "portfolio_value": portfolio_value, # Updated to be based on PV
         "eve_scenarios": eve_scenario_results # New: EVE results for all scenarios
-    )
+    }
