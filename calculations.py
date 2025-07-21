@@ -213,9 +213,23 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
     deposits = db_session.query(models.Deposit).all()
     derivatives = db_session.query(models.Derivative).all()
 
-    loans_df = pd.DataFrame([loan.__dict__ for loan in loans])
-    deposits_df = pd.DataFrame([deposit.__dict__ for deposit in deposits])
-    derivatives_df = pd.DataFrame([derivative.__dict__ for derivative in derivatives])
+    # When converting SQLAlchemy objects to DataFrames, filter out internal attributes
+    loans_data = [
+        {k: v for k, v in loan.__dict__.items() if not k.startswith('_sa_')}
+        for loan in loans
+    ]
+    deposits_data = [
+        {k: v for k, v in deposit.__dict__.items() if not k.startswith('_sa_')}
+        for deposit in deposits
+    ]
+    derivatives_data = [
+        {k: v for k, v in derivative.__dict__.items() if not k.startswith('_sa_')}
+        for derivative in derivatives
+    ]
+
+    loans_df = pd.DataFrame(loans_data)
+    deposits_df = pd.DataFrame(deposits_data)
+    derivatives_df = pd.DataFrame(derivatives_data)
 
     today = date.today()
 
@@ -249,17 +263,21 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
 
     if not loans_df.empty:
         for index, row in loans_df.iterrows():
-            loan_obj = models.Loan(**row.to_dict())
+            # Create a clean dictionary from the row for model instantiation
+            clean_row_dict = {k: v for k, v in row.to_dict().items() if not k.startswith('_sa_')}
+            loan_obj = models.Loan(**clean_row_dict)
             total_pv_assets += calculate_loan_pv(loan_obj, yield_curve, today)
     
     if not deposits_df.empty:
         for index, row in deposits_df.iterrows():
-            deposit_obj = models.Deposit(**row.to_dict())
+            clean_row_dict = {k: v for k, v in row.to_dict().items() if not k.startswith('_sa_')}
+            deposit_obj = models.Deposit(**clean_row_dict)
             total_pv_liabilities += calculate_deposit_pv(deposit_obj, yield_curve, today)
 
     if not derivatives_df.empty:
         for index, row in derivatives_df.iterrows():
-            derivative_obj = models.Derivative(**row.to_dict())
+            clean_row_dict = {k: v for k, v in row.to_dict().items() if not k.startswith('_sa_')}
+            derivative_obj = models.Derivative(**clean_row_dict)
             total_pv_derivatives += calculate_derivative_pv(derivative_obj, yield_curve, today)
 
     eve_value = total_pv_assets - total_pv_liabilities + total_pv_derivatives
@@ -281,9 +299,14 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
     deposits = db.query(models.Deposit).all()
     derivatives = db.query(models.Derivative).all() # Fetch derivatives
 
-    loans_df = pd.DataFrame([loan.__dict__ for loan in loans])
-    deposits_df = pd.DataFrame([deposit.__dict__ for deposit in deposits])
-    derivatives_df = pd.DataFrame([derivative.__dict__ for derivative in derivatives]) # Convert to df
+    # Filter out _sa_instance_state before creating DataFrames
+    loans_data = [{k: v for k, v in loan.__dict__.items() if not k.startswith('_sa_')} for loan in loans]
+    deposits_data = [{k: v for k, v in deposit.__dict__.items() if not k.startswith('_sa_')} for deposit in deposits]
+    derivatives_data = [{k: v for k, v in derivative.__dict__.items() if not k.startswith('_sa_')} for derivative in derivatives]
+
+    loans_df = pd.DataFrame(loans_data)
+    deposits_df = pd.DataFrame(deposits_data)
+    derivatives_df = pd.DataFrame(derivatives_data)
 
     today = date.today()
 
@@ -306,7 +329,7 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
     # Process Loans for NII Gap
     if not loans_df.empty:
         for index, row in loans_df.iterrows():
-            if row['type'] == "Fixed Rate Loan" or pd.isna(row['next_repricing_date']):
+            if row['type'] == "Fixed Rate Loan" or pd.isna(row.get('next_repricing_date')): # Use .get() for safety
                 bucket_name = "Fixed Rate / Non-Sensitive"
             else:
                 bucket_name = get_bucket(row['next_repricing_date'], today, nii_buckets_def)
@@ -316,11 +339,12 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
     # Process Deposits for NII Gap
     if not deposits_df.empty:
         for index, row in deposits_df.iterrows():
-            if pd.isna(row['next_repricing_date']) and pd.isna(row['maturity_date']): # Assume non-repricing
+            # Use .get() for safety as next_repricing_date might not exist for all deposit types
+            if pd.isna(row.get('next_repricing_date')) and pd.isna(row.get('maturity_date')): # Assume non-repricing
                 bucket_name = "Fixed Rate / Non-Sensitive"
-            elif row['type'] == "CD" and pd.notna(row['maturity_date']): # CDs reprice at maturity
+            elif row['type'] == "CD" and pd.notna(row.get('maturity_date')): # CDs reprice at maturity
                 bucket_name = get_bucket(row['maturity_date'], today, nii_buckets_def)
-            elif pd.notna(row['next_repricing_date']): # Other deposits with repricing
+            elif pd.notna(row.get('next_repricing_date')): # Other deposits with repricing
                  bucket_name = get_bucket(row['next_repricing_date'], today, nii_buckets_def)
             else:
                 bucket_name = "Fixed Rate / Non-Sensitive" # Fallback
@@ -364,7 +388,7 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
     # Process Deposits for EVE Gap (based on maturity)
     if not deposits_df.empty:
         for index, row in deposits_df.iterrows():
-            if row['type'] == "CD" and pd.notna(row['maturity_date']):
+            if row['type'] == "CD" and pd.notna(row.get('maturity_date')): # Use .get() for safety
                 bucket_name = get_bucket(row['maturity_date'], today, eve_buckets_def)
             else: # Checking/Savings are non-maturity deposits
                 bucket_name = "Non-Maturity"
