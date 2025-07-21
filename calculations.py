@@ -297,3 +297,174 @@ def calculate_nii_and_eve(db: Session) -> Dict[str, Any]:
         "portfolio_value": portfolio_value, # Updated to be based on PV
         "eve_scenarios": eve_scenario_results # New: EVE results for all scenarios
     }
+
+
+def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
+    """
+    Calculates NII Repricing Gap and EVE Maturity Gap.
+    """
+    loans = db.query(models.Loan).all()
+    deposits = db.query(models.Deposit).all()
+    derivatives = db.query(models.Derivative).all() # Fetch derivatives
+
+    loans_df = pd.DataFrame([loan.__dict__ for loan in loans])
+    deposits_df = pd.DataFrame([deposit.__dict__ for deposit in deposits])
+    derivatives_df = pd.DataFrame([derivative.__dict__ for derivative in derivatives]) # Convert to df
+
+    today = date.today()
+
+    # --- NII Repricing Gap Buckets (in days from today) ---
+    nii_buckets_def = {
+        "0-3 Months": 90,
+        "3-6 Months": 180,
+        "6-12 Months": 365,
+        "1-5 Years": 365 * 5,
+        ">5 Years": 365 * 100, # Effectively "longer"
+        "Fixed Rate / Non-Sensitive": -1 # Special bucket for fixed or non-repricing items
+    }
+    nii_bucket_order = list(nii_buckets_def.keys())
+
+    nii_gap_data: Dict[str, Dict[str, float]] = {
+        bucket: {"assets": 0.0, "liabilities": 0.0, "gap": 0.0}
+        for bucket in nii_bucket_order
+    }
+
+    # Process Loans for NII Gap
+    if not loans_df.empty:
+        for index, row in loans_df.iterrows():
+            if row['type'] == "Fixed Rate Loan" or pd.isna(row['next_repricing_date']):
+                bucket_name = "Fixed Rate / Non-Sensitive"
+            else:
+                bucket_name = get_bucket(row['next_repricing_date'], today, nii_buckets_def)
+            
+            nii_gap_data[bucket_name]["assets"] += row['notional']
+
+    # Process Deposits for NII Gap
+    if not deposits_df.empty:
+        for index, row in deposits_df.iterrows():
+            if pd.isna(row['next_repricing_date']) and pd.isna(row['maturity_date']): # Assume non-repricing
+                bucket_name = "Fixed Rate / Non-Sensitive"
+            elif row['type'] == "CD" and pd.notna(row['maturity_date']): # CDs reprice at maturity
+                bucket_name = get_bucket(row['maturity_date'], today, nii_buckets_def)
+            elif pd.notna(row['next_repricing_date']): # Other deposits with repricing
+                 bucket_name = get_bucket(row['next_repricing_date'], today, nii_buckets_def)
+            else:
+                bucket_name = "Fixed Rate / Non-Sensitive" # Fallback
+            
+            nii_gap_data[bucket_name]["liabilities"] += row['balance']
+
+    # Derivatives also have repricing characteristics, but for NII gap, it's more complex
+    # For simplicity, we'll exclude them from NII repricing gap for now.
+    # A full NII gap would require analyzing the fixed vs floating legs' repricing.
+
+    # Calculate NII Gap
+    nii_gap_results = []
+    for bucket in nii_bucket_order:
+        assets = nii_gap_data[bucket]["assets"]
+        liabilities = nii_gap_data[bucket]["liabilities"]
+        gap = assets - liabilities
+        nii_gap_results.append(schemas.GapBucket(bucket=bucket, assets=assets, liabilities=liabilities, gap=gap))
+
+    # --- EVE Maturity Gap Buckets (in days from today) ---
+    eve_buckets_def = {
+        "0-1 Year": 365,
+        "1-3 Years": 365 * 3,
+        "3-5 Years": 365 * 5,
+        "5-10 Years": 365 * 10,
+        ">10 Years": 365 * 100, # Effectively "longer"
+        "Non-Maturity": -1 # Special bucket for non-maturity deposits (checking/savings)
+    }
+    eve_bucket_order = list(eve_buckets_def.keys())
+
+    eve_gap_data: Dict[str, Dict[str, float]] = {
+        bucket: {"assets": 0.0, "liabilities": 0.0, "gap": 0.0}
+        for bucket in eve_bucket_order
+    }
+
+    # Process Loans for EVE Gap (based on maturity)
+    if not loans_df.empty:
+        for index, row in loans_df.iterrows():
+            bucket_name = get_bucket(row['maturity_date'], today, eve_buckets_def)
+            eve_gap_data[bucket_name]["assets"] += row['notional']
+
+    # Process Deposits for EVE Gap (based on maturity)
+    if not deposits_df.empty:
+        for index, row in deposits_df.iterrows():
+            if row['type'] == "CD" and pd.notna(row['maturity_date']):
+                bucket_name = get_bucket(row['maturity_date'], today, eve_buckets_def)
+            else: # Checking/Savings are non-maturity deposits
+                bucket_name = "Non-Maturity"
+            eve_gap_data[bucket_name]["liabilities"] += row['balance']
+
+    # Derivatives for EVE Gap (based on end_date)
+    if not derivatives_df.empty:
+        for index, row in derivatives_df.iterrows():
+            bucket_name = get_bucket(row['end_date'], today, eve_buckets_def)
+            # Derivatives can be assets or liabilities depending on their PV.
+            # For simplicity, we'll assign their notional to assets/liabilities based on subtype
+            # A more accurate approach would be to assign their PV to the gap bucket.
+            if row['subtype'] == "Payer Swap": # Bank pays fixed, receives floating (often asset-like if rates rise)
+                eve_gap_data[bucket_name]["assets"] += row['notional']
+            elif row['subtype'] == "Receiver Swap": # Bank receives fixed, pays floating (often liability-like if rates rise)
+                eve_gap_data[bucket_name]["liabilities"] += row['notional']
+
+
+    # Calculate EVE Gap
+    eve_gap_results = []
+    for bucket in eve_bucket_order:
+        assets = eve_gap_data[bucket]["assets"]
+        liabilities = eve_gap_data[bucket]["liabilities"]
+        gap = assets - liabilities
+        eve_gap_results.append(schemas.GapBucket(bucket=bucket, assets=assets, liabilities=liabilities, gap=gap))
+
+    return {
+        "nii_repricing_gap": nii_gap_results,
+        "eve_maturity_gap": eve_gap_results
+    }
+
+
+def generate_dashboard_data_from_db(db: Session) -> schemas.DashboardData:
+    """Generates dashboard data by fetching from DB and performing calculations."""
+    global _scenario_history
+
+    # Get calculated financial metrics, including EVE scenarios
+    calculated_metrics = calculate_nii_and_eve(db)
+    gap_analysis_metrics = calculate_gap_analysis(db) # This function is called here!
+
+    # Yield curve data remains the BASE_YIELD_CURVE for display
+    yield_curve_data_for_display = [{"name": tenor, "yield": rate * 100} for tenor, rate in BASE_YIELD_CURVE.items()]
+
+
+    now = datetime.now()
+    # The scenario_data for the historical chart will now be based on the Base Case EVE
+    # and two other scenarios (e.g., Parallel Up/Down) to show historical EVE movement.
+    # For now, we'll keep the random simulation for this chart to avoid overcomplicating
+    # the historical data storage.
+    new_scenario_point = {
+        "time": now.strftime("%H:%M:%S"),
+        "Base Case": calculated_metrics["economic_value_of_equity"], # Use actual base case EVE
+        "+200bps": [res.eve_value for res in calculated_metrics["eve_scenarios"] if res.scenario_name == "Parallel Up +200bps"][0],
+        "-200bps": [res.eve_value for res in calculated_metrics["eve_scenarios"] if res.scenario_name == "Parallel Down -200bps"][0],
+    }
+
+
+    _scenario_history.append(new_scenario_point)
+    _scenario_history = _scenario_history[-MAX_SCENARIO_HISTORY:]
+
+    return schemas.DashboardData(
+        eve_sensitivity=calculated_metrics["eve_sensitivity"],
+        nii_sensitivity=calculated_metrics["nii_sensitivity"],
+        portfolio_value=calculated_metrics["portfolio_value"], # Now based on PV
+        yield_curve_data=yield_curve_data_for_display, # Use base yield curve for display
+        scenario_data=_scenario_history,
+        total_loans=calculated_metrics["total_loans"],
+        total_deposits=calculated_metrics["total_deposits"],
+        total_derivatives=calculated_metrics["total_derivatives"], # New
+        total_assets_value=calculated_metrics["total_assets_value"], # Now PV based
+        total_liabilities_value=calculated_metrics["total_liabilities_value"], # Now PV based
+        net_interest_income=calculated_metrics["net_interest_income"],
+        economic_value_of_equity=calculated_metrics["economic_value_of_equity"], # Base case EVE
+        nii_repricing_gap=gap_analysis_metrics["nii_repricing_gap"], # Passed from calculate_gap_analysis
+        eve_maturity_gap=gap_analysis_metrics["eve_maturity_gap"],   # Passed from calculate_gap_analysis
+        eve_scenarios=calculated_metrics["eve_scenarios"] # Pass all EVE scenarios
+    )
