@@ -1,13 +1,13 @@
 # main.py
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Any, Generator
+from typing import List, Dict, Any, Generator, Optional
 import random
 import time
-from datetime import datetime, date, timedelta # Added timedelta
-import os # Import the 'os' module to access environment variables
-import pandas as pd # Import pandas
+from datetime import datetime, date, timedelta
+import os
+import pandas as pd
 
 # --- SQLAlchemy Imports for Database ---
 from sqlalchemy import create_engine, Column, Integer, String, Float, Date
@@ -15,9 +15,9 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
 # --- Import from local modules ---
-# Ensure these imports correctly reference your project structure
 import models # Import the models module directly
 import schemas # Import the schemas module directly
+import crud # Import the new crud module
 from calculations import generate_dashboard_data_from_db # Import the main data generation function
 
 # --- FastAPI App Initialization ---
@@ -29,9 +29,8 @@ app = FastAPI(
 )
 
 # --- CORS Configuration ---
-# Define allowed origins as a separate variable for clarity and debugging
 ALLOWED_ORIGINS = [
-    "http://localhost:3000", # Your local React development server
+    "http://localhost:3000",
     "https://irrbbb-backend.onrender.com" # Your deployed Render backend URL
 ]
 
@@ -39,8 +38,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], # Explicitly allow OPTIONS for preflight requests
-    allow_headers=["*"], # Allow all headers
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
 )
 
 # --- Database Configuration ---
@@ -49,12 +48,6 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://irrbb_user:irrbb_password
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
-
-# --- Database Models (Copied from models.py for self-containment in main.py) ---
-# NOTE: In a larger project, you would typically import these directly from models.py
-# For this self-contained example, they are defined here.
-# However, since we are now importing `models`, we should remove these local definitions
-# to avoid conflicts. The `models` import handles this.
 
 # --- Dependency to get a database session ---
 def get_db() -> Generator[Session, None, None]:
@@ -70,7 +63,6 @@ def on_startup():
     print(f"DEBUG: FastAPI app starting up. Allowed CORS origins: {ALLOWED_ORIGINS}")
     
     # Create database tables (if they don't exist)
-    # Use models.Base.metadata to create all tables defined in models.py
     models.Base.metadata.create_all(bind=engine)
     print("Database tables created/checked.")
 
@@ -213,53 +205,100 @@ async def get_live_dashboard_data(db: Session = Depends(get_db)):
     Fetches live IRRBB dashboard data, calculated from database instruments
     including scenario-based EVE/NII and portfolio composition.
     """
-    # This function now correctly calls the comprehensive data generation from calculations.py
     return generate_dashboard_data_from_db(db)
 
+# --- LOAN Endpoints (using crud.py) ---
 @app.get("/api/v1/loans", response_model=List[schemas.LoanResponse])
-async def get_loans(db: Session = Depends(get_db)):
+async def read_loans(db: Session = Depends(get_db)):
     """Fetches all loan instruments from the database."""
-    loans = db.query(models.Loan).all()
+    loans = crud.get_loans(db)
     return loans
 
-@app.post("/api/v1/loans", response_model=schemas.LoanResponse, status_code=201)
-async def create_loan(loan: schemas.LoanCreate, db: Session = Depends(get_db)):
+@app.post("/api/v1/loans", response_model=schemas.LoanResponse, status_code=status.HTTP_201_CREATED)
+async def create_loan_endpoint(loan: schemas.LoanCreate, db: Session = Depends(get_db)):
     """Creates a new loan instrument in the database."""
-    db_loan = models.Loan(**loan.model_dump())
-    db.add(db_loan)
-    db.commit()
-    db.refresh(db_loan)
-    return db_loan
+    existing_loan = crud.get_loan(db, loan.instrument_id)
+    if existing_loan:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Loan with this instrument_id already exists.")
+    return crud.create_loan(db, loan)
 
+@app.put("/api/v1/loans/{instrument_id}", response_model=schemas.LoanResponse)
+async def update_loan_endpoint(instrument_id: str, loan_update: schemas.LoanCreate, db: Session = Depends(get_db)):
+    """Updates an existing loan instrument."""
+    db_loan = crud.get_loan(db, instrument_id)
+    if not db_loan:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Loan not found")
+    return crud.update_loan(db, instrument_id, loan_update)
+
+@app.delete("/api/v1/loans/{instrument_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_loan_endpoint(instrument_id: str, db: Session = Depends(get_db)):
+    """Deletes a loan instrument."""
+    deleted = crud.delete_loan(db, instrument_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Loan not found")
+    return {"message": "Loan deleted successfully"}
+
+# --- DEPOSIT Endpoints (using crud.py) ---
 @app.get("/api/v1/deposits", response_model=List[schemas.DepositResponse])
-async def get_deposits(db: Session = Depends(get_db)):
+async def read_deposits(db: Session = Depends(get_db)):
     """Fetches all deposit instruments from the database."""
-    deposits = db.query(models.Deposit).all()
+    deposits = crud.get_deposits(db)
     return deposits
 
-@app.post("/api/v1/deposits", response_model=schemas.DepositResponse, status_code=201)
-async def create_deposit(deposit: schemas.DepositCreate, db: Session = Depends(get_db)):
+@app.post("/api/v1/deposits", response_model=schemas.DepositResponse, status_code=status.HTTP_201_CREATED)
+async def create_deposit_endpoint(deposit: schemas.DepositCreate, db: Session = Depends(get_db)):
     """Creates a new deposit instrument in the database."""
-    db_deposit = models.Deposit(**deposit.model_dump())
-    db.add(db_deposit)
-    db.commit()
-    db.refresh(db_deposit)
-    return db_deposit
+    existing_deposit = crud.get_deposit(db, deposit.instrument_id)
+    if existing_deposit:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Deposit with this instrument_id already exists.")
+    return crud.create_deposit(db, deposit)
 
+@app.put("/api/v1/deposits/{instrument_id}", response_model=schemas.DepositResponse)
+async def update_deposit_endpoint(instrument_id: str, deposit_update: schemas.DepositCreate, db: Session = Depends(get_db)):
+    """Updates an existing deposit instrument."""
+    db_deposit = crud.get_deposit(db, instrument_id)
+    if not db_deposit:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deposit not found")
+    return crud.update_deposit(db, instrument_id, deposit_update)
+
+@app.delete("/api/v1/deposits/{instrument_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_deposit_endpoint(instrument_id: str, db: Session = Depends(get_db)):
+    """Deletes a deposit instrument."""
+    deleted = crud.delete_deposit(db, instrument_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deposit not found")
+    return {"message": "Deposit deleted successfully"}
+
+# --- DERIVATIVE Endpoints (using crud.py) ---
 @app.get("/api/v1/derivatives", response_model=List[schemas.DerivativeResponse])
-async def get_derivatives(db: Session = Depends(get_db)):
+async def read_derivatives(db: Session = Depends(get_db)):
     """Fetches all derivative instruments from the database."""
-    derivatives = db.query(models.Derivative).all()
+    derivatives = crud.get_derivatives(db)
     return derivatives
 
-@app.post("/api/v1/derivatives", response_model=schemas.DerivativeResponse, status_code=201)
-async def create_derivative(derivative: schemas.DerivativeCreate, db: Session = Depends(get_db)):
+@app.post("/api/v1/derivatives", response_model=schemas.DerivativeResponse, status_code=status.HTTP_201_CREATED)
+async def create_derivative_endpoint(derivative: schemas.DerivativeCreate, db: Session = Depends(get_db)):
     """Creates a new derivative instrument in the database."""
-    db_derivative = models.Derivative(**derivative.model_dump())
-    db.add(db_derivative)
-    db.commit()
-    db.refresh(db_derivative)
-    return db_derivative
+    existing_derivative = crud.get_derivative(db, derivative.instrument_id)
+    if existing_derivative:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Derivative with this instrument_id already exists.")
+    return crud.create_derivative(db, derivative)
+
+@app.put("/api/v1/derivatives/{instrument_id}", response_model=schemas.DerivativeResponse)
+async def update_derivative_endpoint(instrument_id: str, derivative_update: schemas.DerivativeCreate, db: Session = Depends(get_db)):
+    """Updates an existing derivative instrument."""
+    db_derivative = crud.get_derivative(db, instrument_id)
+    if not db_derivative:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Derivative not found")
+    return crud.update_derivative(db, instrument_id, derivative_update)
+
+@app.delete("/api/v1/derivatives/{instrument_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_derivative_endpoint(instrument_id: str, db: Session = Depends(get_db)):
+    """Deletes a derivative instrument."""
+    deleted = crud.delete_derivative(db, instrument_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Derivative not found")
+    return {"message": "Derivative deleted successfully"}
 
 # Root endpoint for basic check
 @app.get("/")
