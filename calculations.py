@@ -8,7 +8,8 @@ import math
 
 # Corrected: Import models as a module, so models.Loan, models.Deposit, models.Derivative works
 import models
-from schemas import GapBucket, DashboardData, EVEScenarioResult
+# FIX: Import schemas as a module to resolve 'NameError: name 'schemas' is not defined'
+import schemas
 
 # In-memory store for scenario history (for demonstration)
 _scenario_history: List[Dict[str, Any]] = []
@@ -202,100 +203,73 @@ def get_bucket(item_date: date, today: date, buckets: Dict[str, int]) -> str:
     return "Non-Sensitive / Undefined" # Fallback for dates beyond defined buckets
 
 
-def calculate_nii_and_eve(db: Session) -> Dict[str, Any]:
+def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, float]) -> Dict[str, Any]:
     """
     Calculates Net Interest Income (NII) and Economic Value of Equity (EVE)
-    based on data from the database.
+    based on data from the database for a given yield curve.
     This is a simplified calculation for demonstration purposes.
     """
-    loans = db.query(models.Loan).all()
-    deposits = db.query(models.Deposit).all()
-    derivatives = db.query(models.Derivative).all() # Fetch derivatives
+    loans = db_session.query(models.Loan).all()
+    deposits = db_session.query(models.Deposit).all()
+    derivatives = db_session.query(models.Derivative).all()
 
     loans_df = pd.DataFrame([loan.__dict__ for loan in loans])
     deposits_df = pd.DataFrame([deposit.__dict__ for deposit in deposits])
-    derivatives_df = pd.DataFrame([derivative.__dict__ for derivative in derivatives]) # Convert to df
+    derivatives_df = pd.DataFrame([derivative.__dict__ for derivative in derivatives])
 
     today = date.today()
 
-    # --- NII Calculation (Simplified) ---
+    # --- NII Calculation (Scenario-sensitive) ---
     total_loan_interest_income = 0.0
     if not loans_df.empty:
         loans_df['effective_rate'] = loans_df.apply(
-            lambda row: row['interest_rate'] if row['type'] == 'Fixed Rate Loan' else (BASE_YIELD_CURVE["1Y"] + row['spread'] if pd.notna(row['spread']) else BASE_YIELD_CURVE["1Y"]), # Assume 1Y benchmark for floating
+            lambda row: row['interest_rate'] if row['type'] == 'Fixed Rate Loan' else (
+                interpolate_rate(yield_curve, (row['next_repricing_date'] - today).days if pd.notna(row['next_repricing_date']) else 365) + (row['spread'] if pd.notna(row['spread']) else 0)
+            ),
             axis=1
         )
         total_loan_interest_income = (loans_df['notional'] * loans_df['effective_rate']).sum()
 
     total_deposit_interest_expense = 0.0
     if not deposits_df.empty:
-        total_deposit_interest_expense = (deposits_df['balance'] * deposits_df['interest_rate']).sum()
-
-    # Derivatives impact NII, but for simplicity, we'll only include them in EVE for now.
-    # A full NII calculation would involve projecting cash flows from derivatives.
+        deposits_df['effective_rate'] = deposits_df.apply(
+            lambda row: row['interest_rate'] if row['type'] == 'CD' else (
+                interpolate_rate(yield_curve, (row['next_repricing_date'] - today).days if pd.notna(row['next_repricing_date']) else 30) # Assume 1M for non-maturity repricing
+            ),
+            axis=1
+        )
+        total_deposit_interest_expense = (deposits_df['balance'] * deposits_df['effective_rate']).sum()
 
     net_interest_income = total_loan_interest_income - total_deposit_interest_expense
 
-    # --- EVE Calculation (Comprehensive with Scenarios) ---
-    eve_scenario_results: List[EVEScenarioResult] = []
+    # --- EVE Calculation ---
+    total_pv_assets = 0.0
+    total_pv_liabilities = 0.0
+    total_pv_derivatives = 0.0
 
-    for scenario_name, shock_bps in INTEREST_RATE_SCENARIOS.items():
-        shocked_curve = shock_yield_curve(BASE_YIELD_CURVE, shock_bps)
-        
-        total_pv_assets = 0.0
-        total_pv_liabilities = 0.0
-        total_pv_derivatives = 0.0
-
-        if not loans_df.empty:
-            for index, row in loans_df.iterrows():
-                loan_obj = models.Loan(**row.to_dict()) # Reconstruct model object
-                total_pv_assets += calculate_loan_pv(loan_obj, shocked_curve, today)
-        
-        if not deposits_df.empty:
-            for index, row in deposits_df.iterrows():
-                deposit_obj = models.Deposit(**row.to_dict()) # Reconstruct model object
-                total_pv_liabilities += calculate_deposit_pv(deposit_obj, shocked_curve, today)
-
-        if not derivatives_df.empty:
-            for index, row in derivatives_df.iterrows():
-                derivative_obj = models.Derivative(**row.to_dict()) # Reconstruct model object
-                total_pv_derivatives += calculate_derivative_pv(derivative_obj, shocked_curve, today)
-
-        # EVE = PV(Assets) - PV(Liabilities) + PV(Derivatives)
-        eve_value = total_pv_assets - total_pv_liabilities + total_pv_derivatives
-        eve_scenario_results.append(EVEScenarioResult(scenario_name=scenario_name, eve_value=eve_value))
-
-    # Base Case EVE for dashboard display
-    base_case_eve = [res.eve_value for res in eve_scenario_results if res.scenario_name == "Base Case"][0]
-
-    # Portfolio value for dashboard display (sum of base case PVs)
-    # This is a more realistic "portfolio value" than just notional sum
-    base_curve = BASE_YIELD_CURVE # Use base curve for portfolio value
-    total_assets_value_base = sum(calculate_loan_pv(models.Loan(**row.to_dict()), base_curve, today) for index, row in loans_df.iterrows()) if not loans_df.empty else 0.0
-    total_liabilities_value_base = sum(calculate_deposit_pv(models.Deposit(**row.to_dict()), base_curve, today) for index, row in deposits_df.iterrows()) if not deposits_df.empty else 0.0
-    total_derivatives_value_base = sum(calculate_derivative_pv(models.Derivative(**row.to_dict()), base_curve, today) for index, row in derivatives_df.iterrows()) if not derivatives_df.empty else 0.0
+    if not loans_df.empty:
+        for index, row in loans_df.iterrows():
+            loan_obj = models.Loan(**row.to_dict())
+            total_pv_assets += calculate_loan_pv(loan_obj, yield_curve, today)
     
-    portfolio_value = total_assets_value_base - total_liabilities_value_base + total_derivatives_value_base
+    if not deposits_df.empty:
+        for index, row in deposits_df.iterrows():
+            deposit_obj = models.Deposit(**row.to_dict())
+            total_pv_liabilities += calculate_deposit_pv(deposit_obj, yield_curve, today)
 
+    if not derivatives_df.empty:
+        for index, row in derivatives_df.iterrows():
+            derivative_obj = models.Derivative(**row.to_dict())
+            total_pv_derivatives += calculate_derivative_pv(derivative_obj, yield_curve, today)
 
-    # Simulate sensitivity values (these are now derived from scenario results)
-    # For simplicity, let's just use the base case EVE and a random sensitivity for the main display
-    # A true sensitivity would be (EVE_shocked - EVE_base) / shock_amount
-    eve_sensitivity = round(random.uniform(-0.5, 0.5), 2) # % change in EVE for a rate shock
-    nii_sensitivity = round(random.uniform(-0.2, 0.2), 2) # % change in NII for a rate shock
+    eve_value = total_pv_assets - total_pv_liabilities + total_pv_derivatives
 
     return {
         "net_interest_income": net_interest_income,
-        "economic_value_of_equity": base_case_eve, # Base case EVE
-        "total_assets_value": total_assets_value_base,
-        "total_liabilities_value": total_liabilities_value_base,
-        "total_derivatives": len(derivatives), # New
-        "eve_sensitivity": eve_sensitivity,
-        "nii_sensitivity": nii_sensitivity,
-        "total_loans": len(loans),
-        "total_deposits": len(deposits),
-        "portfolio_value": portfolio_value, # Updated to be based on PV
-        "eve_scenarios": eve_scenario_results # New: EVE results for all scenarios
+        "economic_value_of_equity": eve_value,
+        "total_assets_value": total_pv_assets,
+        "total_liabilities_value": total_pv_liabilities,
+        "total_derivatives_value": total_pv_derivatives # New: PV of derivatives
     }
 
 
@@ -424,47 +398,118 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
 
 
 def generate_dashboard_data_from_db(db: Session) -> schemas.DashboardData:
-    """Generates dashboard data by fetching from DB and performing calculations."""
+    """
+    Generates dashboard data by fetching from DB and performing calculations,
+    including scenario-based EVE/NII and portfolio composition.
+    """
     global _scenario_history
 
-    # Get calculated financial metrics, including EVE scenarios
-    calculated_metrics = calculate_nii_and_eve(db)
-    gap_analysis_metrics = calculate_gap_analysis(db) # This function is called here!
+    today = date.today()
+    loans = db.query(models.Loan).all()
+    deposits = db.query(models.Deposit).all()
+    derivatives = db.query(models.Derivative).all()
 
-    # Yield curve data remains the BASE_YIELD_CURVE for display
+    # --- Calculate Portfolio Composition ---
+    loan_composition: Dict[str, float] = {}
+    for loan in loans:
+        loan_composition[loan.type] = loan_composition.get(loan.type, 0.0) + loan.notional
+
+    deposit_composition: Dict[str, float] = {}
+    for deposit in deposits:
+        deposit_composition[deposit.type] = deposit_composition.get(deposit.type, 0.0) + deposit.balance
+    
+    derivative_composition: Dict[str, float] = {}
+    for derivative in derivatives:
+        derivative_composition[derivative.type] = derivative_composition.get(derivative.type, 0.0) + derivative.notional
+
+
+    # --- Calculate EVE and NII for all Scenarios ---
+    eve_scenario_results: List[schemas.EVEScenarioResult] = []
+    nii_scenario_results: List[schemas.NIIScenarioResult] = []
+    
+    base_case_eve = 0.0
+    base_case_nii = 0.0
+    total_assets_value_base = 0.0
+    total_liabilities_value_base = 0.0
+    portfolio_value_base = 0.0
+
+    for scenario_name, shock_bps in INTEREST_RATE_SCENARIOS.items():
+        shocked_curve = shock_yield_curve(BASE_YIELD_CURVE, shock_bps)
+        
+        # Calculate NII and EVE for the current shocked curve
+        metrics_for_curve = calculate_nii_and_eve_for_curve(db, shocked_curve)
+        
+        eve_scenario_results.append(schemas.EVEScenarioResult(
+            scenario_name=scenario_name,
+            eve_value=metrics_for_curve["economic_value_of_equity"]
+        ))
+        nii_scenario_results.append(schemas.NIIScenarioResult(
+            scenario_name=scenario_name,
+            nii_value=metrics_for_curve["net_interest_income"]
+        ))
+
+        if scenario_name == "Base Case":
+            base_case_eve = metrics_for_curve["economic_value_of_equity"]
+            base_case_nii = metrics_for_curve["net_interest_income"]
+            total_assets_value_base = metrics_for_curve["total_assets_value"]
+            total_liabilities_value_base = metrics_for_curve["total_liabilities_value"]
+            portfolio_value_base = total_assets_value_base - total_liabilities_value_base + metrics_for_curve["total_derivatives_value"]
+
+
+    # --- Calculate Sensitivities ---
+    eve_sensitivity = 0.0
+    nii_sensitivity = 0.0
+
+    # Find the "Parallel Up +200bps" scenario for sensitivity calculation
+    eve_up_200bps = next((res.eve_value for res in eve_scenario_results if res.scenario_name == "Parallel Up +200bps"), None)
+    nii_up_200bps = next((res.nii_value for res in nii_scenario_results if res.scenario_name == "Parallel Up +200bps"), None)
+
+    if base_case_eve != 0 and eve_up_200bps is not None:
+        eve_sensitivity = ((eve_up_200bps - base_case_eve) / base_case_eve) * 100
+        eve_sensitivity = round(eve_sensitivity, 2)
+
+    if base_case_nii != 0 and nii_up_200bps is not None:
+        nii_sensitivity = ((nii_up_200bps - base_case_nii) / base_case_nii) * 100
+        nii_sensitivity = round(nii_sensitivity, 2)
+
+
+    # --- Gap Analysis Metrics (unchanged, still uses current state) ---
+    gap_analysis_metrics = calculate_gap_analysis(db)
+
+    # --- Yield Curve Data for Display (Base Case) ---
     yield_curve_data_for_display = [{"name": tenor, "yield": rate * 100} for tenor, rate in BASE_YIELD_CURVE.items()]
 
-
+    # --- Historical Scenario Data (for the EVE chart over time) ---
     now = datetime.now()
-    # The scenario_data for the historical chart will now be based on the Base Case EVE
-    # and two other scenarios (e.g., Parallel Up/Down) to show historical EVE movement.
-    # For now, we'll keep the random simulation for this chart to avoid overcomplicating
-    # the historical data storage.
     new_scenario_point = {
         "time": now.strftime("%H:%M:%S"),
-        "Base Case": calculated_metrics["economic_value_of_equity"], # Use actual base case EVE
-        "+200bps": [res.eve_value for res in calculated_metrics["eve_scenarios"] if res.scenario_name == "Parallel Up +200bps"][0],
-        "-200bps": [res.eve_value for res in calculated_metrics["eve_scenarios"] if res.scenario_name == "Parallel Down -200bps"][0],
+        "Base Case": base_case_eve, # Use actual calculated base case EVE
+        "+200bps": next((res.eve_value for res in eve_scenario_results if res.scenario_name == "Parallel Up +200bps"), base_case_eve),
+        "-200bps": next((res.eve_value for res in eve_scenario_results if res.scenario_name == "Parallel Down -200bps"), base_case_eve),
     }
-
 
     _scenario_history.append(new_scenario_point)
     _scenario_history = _scenario_history[-MAX_SCENARIO_HISTORY:]
 
+
     return schemas.DashboardData(
-        eve_sensitivity=calculated_metrics["eve_sensitivity"],
-        nii_sensitivity=calculated_metrics["nii_sensitivity"],
-        portfolio_value=calculated_metrics["portfolio_value"], # Now based on PV
-        yield_curve_data=yield_curve_data_for_display, # Use base yield curve for display
+        eve_sensitivity=eve_sensitivity,
+        nii_sensitivity=nii_sensitivity,
+        portfolio_value=portfolio_value_base,
+        yield_curve_data=yield_curve_data_for_display,
         scenario_data=_scenario_history,
-        total_loans=calculated_metrics["total_loans"],
-        total_deposits=calculated_metrics["total_deposits"],
-        total_derivatives=calculated_metrics["total_derivatives"], # New
-        total_assets_value=calculated_metrics["total_assets_value"], # Now PV based
-        total_liabilities_value=calculated_metrics["total_liabilities_value"], # Now PV based
-        net_interest_income=calculated_metrics["net_interest_income"],
-        economic_value_of_equity=calculated_metrics["economic_value_of_equity"], # Base case EVE
-        nii_repricing_gap=gap_analysis_metrics["nii_repricing_gap"], # Passed from calculate_gap_analysis
-        eve_maturity_gap=gap_analysis_metrics["eve_maturity_gap"],   # Passed from calculate_gap_analysis
-        eve_scenarios=calculated_metrics["eve_scenarios"] # Pass all EVE scenarios
+        total_loans=len(loans),
+        total_deposits=len(deposits),
+        total_derivatives=len(derivatives),
+        total_assets_value=total_assets_value_base,
+        total_liabilities_value=total_liabilities_value_base,
+        net_interest_income=base_case_nii,
+        economic_value_of_equity=base_case_eve,
+        nii_repricing_gap=gap_analysis_metrics["nii_repricing_gap"],
+        eve_maturity_gap=gap_analysis_metrics["eve_maturity_gap"],
+        eve_scenarios=eve_scenario_results,
+        nii_scenarios=nii_scenario_results, # NEW
+        loan_composition=loan_composition, # NEW
+        deposit_composition=deposit_composition, # NEW
+        derivative_composition=derivative_composition # NEW
     )

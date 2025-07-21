@@ -81,20 +81,29 @@ class EVEScenarioResult(BaseModel):
     scenario_name: str
     eve_value: float
 
-# Dashboard Data Schema (UPDATED for EVE scenarios)
+# New: NII Scenario Result (for scenario-based NII)
+class NIIScenarioResult(BaseModel):
+    scenario_name: str
+    nii_value: float
+
+# Dashboard Data Schema (UPDATED for EVE scenarios, NII scenarios, and portfolio composition)
 class DashboardData(BaseModel):
-    eve_sensitivity: float # This might become less relevant or represent base case sensitivity
-    nii_sensitivity: float # This might become less relevant or represent base case sensitivity
+    eve_sensitivity: float # This will be calculated, not random
+    nii_sensitivity: float # This will be calculated, not random
     portfolio_value: float
     yield_curve_data: List[Dict[str, Any]]
-    scenario_data: List[Dict[str, Any]] # This is for the historical EVE chart, maybe rename
+    scenario_data: List[Dict[str, Any]] # This is for the historical EVE chart
     total_loans: int
     total_deposits: int
-    total_derivatives: int # New field
+    total_derivatives: int
     total_assets_value: float
     total_liabilities_value: float
-    net_interest_income: float
+    net_interest_income: float # This will be the base case NII
     economic_value_of_equity: float # This will be the base case EVE
     nii_repricing_gap: List[GapBucket]
     eve_maturity_gap: List[GapBucket]
-    eve_scenarios: List[EVEScenarioResult] # New: EVE results for all 6 scenarios
+    eve_scenarios: List[EVEScenarioResult] # EVE results for all 6 scenarios
+    nii_scenarios: List[NIIScenarioResult] # NEW: NII results for all 6 scenarios
+    loan_composition: Dict[str, float] # NEW: Breakdown of loans by type/subtype
+    deposit_composition: Dict[str, float] # NEW: Breakdown of deposits by type/subtype
+    derivative_composition: Dict[str, float] # NEW: Breakdown of derivatives by type/subtype
