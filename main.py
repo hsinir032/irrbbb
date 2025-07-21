@@ -1,44 +1,37 @@
 # main.py
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import date, timedelta
+from pydantic import BaseModel
+from typing import List, Dict, Any, Generator, Optional
 import random
+import time
+from datetime import datetime, date, timedelta
 import os
-import pandas as pd # Still needed for pandas.isna in on_startup data generation
+import pandas as pd
 
-# Import modules using absolute paths (assuming project root is on PYTHONPATH)
-from database import Base, engine, SessionLocal, get_db
-from models import Loan, Deposit, Derivative # Import new Derivative model
-from schemas import (
-    LoanBase, LoanCreate, LoanResponse,
-    DepositBase, DepositCreate, DepositResponse,
-    DerivativeBase, DerivativeCreate, DerivativeResponse, # Import new Derivative schemas
-    GapBucket, DashboardData, EVEScenarioResult # Import new EVE Scenario Result
-)
-from crud import (
-    get_loan, get_loans, create_loan,
-    get_deposit, get_deposits, create_deposit,
-    # New CRUD functions for derivatives will be added later in crud.py
-)
-from calculations import (
-    get_bucket, calculate_nii_and_eve,
-    calculate_gap_analysis, generate_dashboard_data_from_db
-)
-from routers import dashboard, instruments # Import the API routers
+# --- SQLAlchemy Imports for Database ---
+from sqlalchemy import create_engine, Column, Integer, String, Float, Date
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
 
+# --- Import from local modules ---
+# Ensure these imports correctly reference your project structure
+import models # Import the models module directly
+import schemas # Import the schemas module directly
+from calculations import generate_dashboard_data_from_db # Import the main data generation function
 
 # --- FastAPI App Initialization ---
 app = FastAPI(
     title="IRRBB Dashboard Backend",
     description="API for fetching simulated IRRBB metrics and data from a database.",
     version="0.1.0",
-    openapi_url="/openapi.json" # Ensure OpenAPI spec is generated
+    openapi_url="/openapi.json"
 )
 
 # --- CORS Configuration ---
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
-    "https://irrbbb-backend.onrender.com"
+    "https://irrbbb-backend.onrender.com" # Your deployed Render backend URL
 ]
 
 app.add_middleware(
@@ -49,19 +42,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Database Configuration ---
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://irrbb_user:irrbb_password@localhost:5432/irrbb_db")
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# --- Database Models (Copied from models.py for self-containment in main.py) ---
+# NOTE: In a larger project, you would typically import these directly from models.py
+# For this self-contained example, they are defined here.
+# However, since we are now importing `models`, we should remove these local definitions
+# to avoid conflicts. The `models` import handles this.
+
+# --- Dependency to get a database session ---
+def get_db() -> Generator[Session, None, None]:
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 # --- Database Initialization and Data Population on Startup ---
 @app.on_event("startup")
 def on_startup():
     print(f"DEBUG: FastAPI app starting up. Allowed CORS origins: {ALLOWED_ORIGINS}")
     
     # Create database tables (if they don't exist)
-    Base.metadata.create_all(bind=engine)
+    # Use models.Base.metadata to create all tables defined in models.py
+    models.Base.metadata.create_all(bind=engine)
     print("Database tables created/checked.")
 
     db = SessionLocal()
 
     # Populate Loans if table is empty
-    if db.query(Loan).count() == 0: # Use imported Loan model
+    if db.query(models.Loan).count() == 0:
         print("Adding initial dummy loan data...")
         current_date = date.today()
         dummy_loans = []
@@ -75,14 +90,13 @@ def on_startup():
             benchmark_rate_type = None
             spread = None
             repricing_frequency = None
-            next_repricing_date = None
-            payment_frequency = random.choice(["Monthly", "Quarterly", "Semi-Annually", "Annually"]) # New
+            next_repricing_date = None # New field for repricing date
+            payment_frequency = random.choice(["Monthly", "Quarterly", "Semi-Annually", "Annually"])
 
             if loan_type == "Floating Rate Loan":
                 benchmark_rate_type = random.choice(["SOFR", "Prime"])
                 spread = round(random.uniform(0.005, 0.02), 4) # 0.5% to 2% spread
                 repricing_frequency = random.choice(["Monthly", "Quarterly", "Annually"])
-                # Simulate next repricing date for floating loans
                 if repricing_frequency == "Monthly":
                     next_repricing_date = current_date + timedelta(days=random.randint(0, 30))
                 elif repricing_frequency == "Quarterly":
@@ -92,7 +106,7 @@ def on_startup():
                 interest_rate = None # Floating rates are calculated, not fixed
 
             dummy_loans.append(
-                Loan( # Use imported Loan model
+                models.Loan(
                     instrument_id=f"LOAN{i:03d}",
                     type=loan_type,
                     notional=notional,
@@ -103,7 +117,7 @@ def on_startup():
                     spread=spread,
                     repricing_frequency=repricing_frequency,
                     next_repricing_date=next_repricing_date,
-                    payment_frequency=payment_frequency # New
+                    payment_frequency=payment_frequency
                 )
             )
         db.add_all(dummy_loans)
@@ -111,7 +125,7 @@ def on_startup():
         print(f"{len(dummy_loans)} dummy loan data added.")
 
     # Populate Deposits if table is empty
-    if db.query(Deposit).count() == 0: # Use imported Deposit model
+    if db.query(models.Deposit).count() == 0:
         print("Adding initial dummy deposit data...")
         current_date = date.today()
         dummy_deposits = []
@@ -123,12 +137,12 @@ def on_startup():
             maturity_date = None
             repricing_frequency = None
             next_repricing_date = None
-            payment_frequency = None # Default for checking/savings
+            payment_frequency = None
 
             if deposit_type == "CD":
                 maturity_date = open_date + timedelta(days=random.randint(90, 730)) # 3 months to 2 years
-                payment_frequency = random.choice(["Monthly", "Quarterly", "Semi-Annually", "Annually"]) # New for CDs
-            elif deposit_type in ["Savings", "Checking"]: # Assume these can reprice, even if not explicitly "floating"
+                payment_frequency = random.choice(["Monthly", "Quarterly", "Semi-Annually", "Annually"])
+            elif deposit_type in ["Savings", "Checking"]:
                 repricing_frequency = random.choice(["Monthly", "Quarterly"])
                 if repricing_frequency == "Monthly":
                     next_repricing_date = current_date + timedelta(days=random.randint(0, 30))
@@ -136,7 +150,7 @@ def on_startup():
                     next_repricing_date = current_date + timedelta(days=random.randint(0, 90))
 
             dummy_deposits.append(
-                Deposit( # Use imported Deposit model
+                models.Deposit(
                     instrument_id=f"DEP{i:03d}",
                     type=deposit_type,
                     balance=balance,
@@ -145,15 +159,15 @@ def on_startup():
                     maturity_date=maturity_date,
                     repricing_frequency=repricing_frequency,
                     next_repricing_date=next_repricing_date,
-                    payment_frequency=payment_frequency # New
+                    payment_frequency=payment_frequency
                 )
             )
         db.add_all(dummy_deposits)
         db.commit()
         print(f"{len(dummy_deposits)} dummy deposit data added.")
 
-    # Populate Derivatives if table is empty (NEW)
-    if db.query(Derivative).count() == 0:
+    # Populate Derivatives if table is empty
+    if db.query(models.Derivative).count() == 0:
         print("Adding initial dummy derivative data...")
         current_date = date.today()
         dummy_derivatives = []
@@ -172,7 +186,7 @@ def on_startup():
             floating_payment_frequency = random.choice(["Monthly", "Quarterly"])
 
             dummy_derivatives.append(
-                Derivative(
+                models.Derivative(
                     instrument_id=f"SWAP{i:02d}",
                     type=derivative_type,
                     subtype=subtype,
@@ -191,9 +205,60 @@ def on_startup():
         print(f"{len(dummy_derivatives)} dummy derivative data added.")
     db.close()
 
-# --- Include API Routers ---
-app.include_router(dashboard.router)
-app.include_router(instruments.router)
+# --- API Endpoints ---
+@app.get("/api/v1/dashboard/live-data", response_model=schemas.DashboardData)
+async def get_live_dashboard_data(db: Session = Depends(get_db)):
+    """
+    Fetches live IRRBB dashboard data, calculated from database instruments
+    including scenario-based EVE/NII and portfolio composition.
+    """
+    # This function now correctly calls the comprehensive data generation from calculations.py
+    return generate_dashboard_data_from_db(db)
+
+@app.get("/api/v1/loans", response_model=List[schemas.LoanResponse])
+async def get_loans(db: Session = Depends(get_db)):
+    """Fetches all loan instruments from the database."""
+    loans = db.query(models.Loan).all()
+    return loans
+
+@app.post("/api/v1/loans", response_model=schemas.LoanResponse, status_code=201)
+async def create_loan(loan: schemas.LoanCreate, db: Session = Depends(get_db)):
+    """Creates a new loan instrument in the database."""
+    db_loan = models.Loan(**loan.model_dump())
+    db.add(db_loan)
+    db.commit()
+    db.refresh(db_loan)
+    return db_loan
+
+@app.get("/api/v1/deposits", response_model=List[schemas.DepositResponse])
+async def get_deposits(db: Session = Depends(get_db)):
+    """Fetches all deposit instruments from the database."""
+    deposits = db.query(models.Deposit).all()
+    return deposits
+
+@app.post("/api/v1/deposits", response_model=schemas.DepositResponse, status_code=201)
+async def create_deposit(deposit: schemas.DepositCreate, db: Session = Depends(get_db)):
+    """Creates a new deposit instrument in the database."""
+    db_deposit = models.Deposit(**deposit.model_dump())
+    db.add(db_deposit)
+    db.commit()
+    db.refresh(db_deposit)
+    return db_deposit
+
+@app.get("/api/v1/derivatives", response_model=List[schemas.DerivativeResponse])
+async def get_derivatives(db: Session = Depends(get_db)):
+    """Fetches all derivative instruments from the database."""
+    derivatives = db.query(models.Derivative).all()
+    return derivatives
+
+@app.post("/api/v1/derivatives", response_model=schemas.DerivativeResponse, status_code=201)
+async def create_derivative(derivative: schemas.DerivativeCreate, db: Session = Depends(get_db)):
+    """Creates a new derivative instrument in the database."""
+    db_derivative = models.Derivative(**derivative.model_dump())
+    db.add(db_derivative)
+    db.commit()
+    db.refresh(db_derivative)
+    return db_derivative
 
 # Root endpoint for basic check
 @app.get("/")
