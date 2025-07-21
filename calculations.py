@@ -213,6 +213,11 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
     deposits = db_session.query(models.Deposit).all()
     derivatives = db_session.query(models.Derivative).all()
 
+    # Get column names for each model to filter DataFrame rows
+    loan_cols = {col.name for col in models.Loan.__table__.columns}
+    deposit_cols = {col.name for col in models.Deposit.__table__.columns}
+    derivative_cols = {col.name for col in models.Derivative.__table__.columns}
+
     # When converting SQLAlchemy objects to DataFrames, filter out internal attributes
     loans_data = [
         {k: v for k, v in loan.__dict__.items() if not k.startswith('_sa_')}
@@ -263,20 +268,22 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
 
     if not loans_df.empty:
         for index, row in loans_df.iterrows():
-            # Create a clean dictionary from the row for model instantiation
-            clean_row_dict = {k: v for k, v in row.to_dict().items() if not k.startswith('_sa_')}
+            # Filter row.to_dict() to only include actual model columns
+            clean_row_dict = {k: v for k, v in row.to_dict().items() if k in loan_cols}
             loan_obj = models.Loan(**clean_row_dict)
             total_pv_assets += calculate_loan_pv(loan_obj, yield_curve, today)
     
     if not deposits_df.empty:
         for index, row in deposits_df.iterrows():
-            clean_row_dict = {k: v for k, v in row.to_dict().items() if not k.startswith('_sa_')}
+            # Filter row.to_dict() to only include actual model columns
+            clean_row_dict = {k: v for k, v in row.to_dict().items() if k in deposit_cols}
             deposit_obj = models.Deposit(**clean_row_dict)
             total_pv_liabilities += calculate_deposit_pv(deposit_obj, yield_curve, today)
 
     if not derivatives_df.empty:
         for index, row in derivatives_df.iterrows():
-            clean_row_dict = {k: v for k, v in row.to_dict().items() if not k.startswith('_sa_')}
+            # Filter row.to_dict() to only include actual model columns
+            clean_row_dict = {k: v for k, v in row.to_dict().items() if k in derivative_cols}
             derivative_obj = models.Derivative(**clean_row_dict)
             total_pv_derivatives += calculate_derivative_pv(derivative_obj, yield_curve, today)
 
