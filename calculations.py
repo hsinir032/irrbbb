@@ -608,7 +608,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     gap_analysis_metrics = calculate_gap_analysis(db)
 
     # --- Yield Curve Data for Display (Base Case) ---
-    yield_curve_data_for_display = [{"name": tenor, "yield": rate * 100} for tenor, rate in BASE_YIELD_CURVE.items()]
+    yield_curve_data_for_display = [schemas.YieldCurvePoint(name=tenor, rate=rate*100) for tenor, rate in BASE_YIELD_CURVE.items()]
 
     # --- Historical Scenario Data (for the EVE chart over time) ---
     now = datetime.now()
