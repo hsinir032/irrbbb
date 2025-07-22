@@ -31,7 +31,7 @@ app = FastAPI(
 # --- CORS Configuration ---
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
-    "https://irrbbb-backend.onrender.com" # Your deployed Render backend URL
+    "https://irrbbb-backend.onrender.com", # Your deployed Render backend URL
     "https://irrbb-frontend.onrender.com",  # Your deployed frontend	
 ]
 
