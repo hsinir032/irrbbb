@@ -614,9 +614,11 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     now = datetime.now()
     new_scenario_point = {
         "time": now.strftime("%H:%M:%S"),
-        "Base Case": base_case_eve,
-        "+200bps": next((res.eve_value for res in eve_scenario_results if res.scenario_name == "Parallel Up +200bps"), base_case_eve),
-        "-200bps": next((res.eve_value for res in eve_scenario_results if res.scenario_name == "Parallel Down -200bps"), base_case_eve),
+        "data":{
+		"Base Case": base_case_eve,
+        	"+200bps": next((res.eve_value for res in eve_scenario_results if res.scenario_name == "Parallel Up +200bps"), base_case_eve),
+       		"-200bps": next((res.eve_value for res in eve_scenario_results if res.scenario_name == "Parallel Down -200bps"), base_case_eve),
+		}
     }
 
     _scenario_history.append(new_scenario_point)
