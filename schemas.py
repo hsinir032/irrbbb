@@ -74,8 +74,7 @@ class DerivativeResponse(DerivativeBase):
 # --- Dashboard Data Schemas ---
 class YieldCurvePoint(BaseModel):
     name: str # Tenor, e.g., "1Y", "5Y"
-    rate: float = Field(..., alias="yield")
-
+    rate: float
 class ScenarioDataPoint(BaseModel):
     time: str # Timestamp for historical data
     # Dynamic fields for scenario values, e.g., "Base Case", "+200bps"
