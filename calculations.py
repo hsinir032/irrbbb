@@ -1,22 +1,23 @@
 # calculations.py
 import random
 from datetime import datetime, date, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple, Optional
 import pandas as pd
 from sqlalchemy.orm import Session
 import math
 
-# Corrected: Import models as a module, so models.Loan, models.Deposit, models.Derivative works
 import models
-# FIX: Import schemas as a module to resolve 'NameError: name 'schemas' is not defined'
 import schemas
 
 # In-memory store for scenario history (for demonstration)
 _scenario_history: List[Dict[str, Any]] = []
 MAX_SCENARIO_HISTORY = 10
 
+# Define NII horizon in days (e.g., 1 year for NII calculations)
+NII_HORIZON_DAYS = 365
+
 # --- Helper function to convert frequency to periods per year ---
-def get_periods_per_year(frequency: str) -> int:
+def get_periods_per_year(frequency: Optional[str]) -> int:
     if frequency == "Monthly":
         return 12
     elif frequency == "Quarterly":
@@ -25,7 +26,7 @@ def get_periods_per_year(frequency: str) -> int:
         return 2
     elif frequency == "Annually":
         return 1
-    return 1 # Default
+    return 0 # For non-periodic or undefined
 
 # --- Yield Curve and Scenario Definitions ---
 BASE_YIELD_CURVE = {
@@ -72,6 +73,8 @@ def interpolate_rate(yield_curve: Dict[str, float], days_to_maturity: int) -> fl
     }
     tenors = sorted(tenor_map.keys(), key=lambda x: tenor_map[x])
 
+    if days_to_maturity <= 0:
+        return yield_curve[tenors[0]] # Use shortest rate for immediate cash flows
     if days_to_maturity <= tenor_map[tenors[0]]:
         return yield_curve[tenors[0]]
     if days_to_maturity >= tenor_map[tenors[-1]]:
@@ -82,60 +85,181 @@ def interpolate_rate(yield_curve: Dict[str, float], days_to_maturity: int) -> fl
         days1, days2 = tenor_map[t1], tenor_map[t2]
         rate1, rate2 = yield_curve[t1], yield_curve[t2]
 
+        if days1 == days2: # Avoid division by zero
+            return rate1
+
         if days1 <= days_to_maturity <= days2:
-            if days1 == days2: # Avoid division by zero
-                return rate1
             # Linear interpolation
             return rate1 + (rate2 - rate1) * (days_to_maturity - days1) / (days2 - days1)
-    return yield_curve[tenors[-1]] # Fallback
+    return yield_curve[tenors[-1]] # Fallback for very long dates
 
 
-# --- Present Value Calculation Functions (Simplified) ---
+# --- Core Cash Flow Projection and PV Calculation ---
 
-def calculate_loan_pv(loan: models.Loan, yield_curve: Dict[str, float], today: date) -> float:
+def calculate_pv_of_cashflows(cashflows: List[Tuple[date, float]], yield_curve: Dict[str, float], today: date) -> float:
     """
-    Simplified PV calculation for a loan.
-    Assumes loan's value is primarily driven by its notional and remaining term.
-    For floating rate loans, assumes repricing to current interpolated curve rate.
+    Calculates the present value of a list of (date, amount) cash flows.
+    Each cash flow is discounted using the interpolated rate for its time to payment.
     """
-    days_to_maturity = (loan.maturity_date - today).days
-    if days_to_maturity <= 0:
-        return 0.0 # Matured loan
+    total_pv = 0.0
+    for cf_date, cf_amount in cashflows:
+        if cf_date <= today:
+            if cf_date == today:
+                total_pv += cf_amount # Include today's cash flows at face value
+            continue
 
-    # Determine the effective interest rate for discounting
-    if loan.type == "Fixed Rate Loan":
+        days_to_payment = (cf_date - today).days
+        if days_to_payment <= 0: # Should be caught by cf_date <= today, but as a safeguard
+            total_pv += cf_amount # Treat as immediate if very close
+            continue
+
+        discount_rate = interpolate_rate(yield_curve, days_to_payment)
+        discount_factor = 1 / (1 + discount_rate * (days_to_payment / 365.0)) # Simple annual compounding
+        total_pv += cf_amount * discount_factor
+    return total_pv
+
+def generate_loan_cashflows(loan: models.Loan, yield_curve: Dict[str, float], today: date, 
+                            include_principal: bool = True, prepayment_rate: float = 0.0) -> List[Tuple[date, float]]:
+    """
+    Generates projected interest and principal cash flows for a loan,
+    incorporating a constant annual prepayment rate (CPR).
+    Returns a list of (date, amount) tuples. Positive for income.
+    """
+    cashflows = []
+    current_balance = loan.notional
+    payment_periods_per_year = get_periods_per_year(loan.payment_frequency)
+    
+    if payment_periods_per_year == 0 and loan.maturity_date:
+        if include_principal and loan.maturity_date > today:
+            cashflows.append((loan.maturity_date, current_balance))
+        return cashflows
+    elif payment_periods_per_year == 0:
+        return []
+
+    interval_days = 365 / payment_periods_per_year
+    prepayment_per_period = (1 - (1 - prepayment_rate)**(interval_days / 365.0)) # Convert CPR to period rate
+
+    next_payment_date = loan.origination_date
+    while next_payment_date <= today:
+        next_payment_date += timedelta(days=interval_days)
+
+    if next_payment_date <= today:
+        next_payment_date = today + timedelta(days=interval_days)
+
+    current_repricing_date = loan.next_repricing_date if loan.next_repricing_date else loan.origination_date
+    if current_repricing_date < today:
+        current_repricing_date = today
+
+    while next_payment_date <= loan.maturity_date and current_balance > 0.01: # Continue as long as balance > 0
+        # Determine effective rate for this period
         effective_rate = loan.interest_rate
-    else: # Floating Rate Loan
-        # For floating, assume it reprices to the current interpolated rate for its remaining term
-        effective_rate = interpolate_rate(yield_curve, days_to_maturity) + (loan.spread if loan.spread is not None else 0)
 
-    # Simple discounting of notional at maturity
-    # In reality, this would involve projecting and discounting all future cash flows (interest + principal)
-    discount_factor = 1 / (1 + effective_rate * (days_to_maturity / 365))
-    pv = loan.notional * discount_factor
-    return pv
+        if loan.type == "Floating Rate Loan":
+            if current_repricing_date <= next_payment_date:
+                days_to_reprice = (current_repricing_date - today).days if current_repricing_date > today else 0
+                effective_rate = interpolate_rate(yield_curve, days_to_reprice) + (loan.spread if loan.spread is not None else 0)
+                
+                repricing_freq_days = 365 / get_periods_per_year(loan.repricing_frequency) if loan.repricing_frequency else 0
+                
+                if repricing_freq_days > 0:
+                    current_repricing_date += timedelta(days=repricing_freq_days)
+                else:
+                    current_repricing_date = loan.maturity_date + timedelta(days=1)
 
-def calculate_deposit_pv(deposit: models.Deposit, yield_curve: Dict[str, float], today: date) -> float:
+            if effective_rate is None:
+                 effective_rate = interpolate_rate(yield_curve, (next_payment_date - today).days) + (loan.spread if loan.spread is not None else 0)
+
+        # Calculate interest for the period
+        interest_amount = current_balance * effective_rate * (interval_days / 365.0)
+        cashflows.append((next_payment_date, interest_amount))
+
+        # Apply prepayment and reduce balance
+        if prepayment_rate > 0 and include_principal:
+            prepayment_amount = current_balance * prepayment_per_period
+            current_balance -= prepayment_amount
+            if current_balance < 0: # Ensure balance doesn't go negative
+                current_balance = 0
+
+        next_payment_date += timedelta(days=interval_days)
+
+    # Add remaining principal at maturity if not fully prepaid
+    if include_principal and current_balance > 0.01 and loan.maturity_date and loan.maturity_date > today:
+        cashflows.append((loan.maturity_date, current_balance))
+
+    return cashflows
+
+
+def generate_deposit_cashflows(deposit: models.Deposit, yield_curve: Dict[str, float], today: date, 
+                                include_principal: bool = True, nmd_effective_maturity_years: int = 5, 
+                                nmd_deposit_beta: float = 0.5) -> List[Tuple[date, float]]:
     """
-    Simplified PV calculation for a deposit.
-    For non-maturity deposits (checking/savings), value is approx balance.
-    For CDs, it's discounted balance.
+    Generates projected interest and principal cash flows for a deposit,
+    incorporating behavioral assumptions for Non-Maturity Deposits (NMDs).
+    Returns a list of (date, amount) tuples. Negative for expense.
     """
-    if deposit.type in ["Checking", "Savings"]:
-        # Non-maturity deposits are often valued at par or with a small discount/premium
-        # For simplicity, assume PV is current balance.
-        return deposit.balance
-    elif deposit.type == "CD" and deposit.maturity_date:
-        days_to_maturity = (deposit.maturity_date - today).days
-        if days_to_maturity <= 0:
-            return 0.0 # Matured CD
+    cashflows = []
+    current_balance = deposit.balance
+    
+    # Handle CDs (Certificate of Deposits)
+    if deposit.type == "CD":
+        if not deposit.maturity_date or deposit.maturity_date <= today:
+            return [] # Matured CD
 
-        # Use deposit's fixed rate for discounting its balance
-        effective_rate = deposit.interest_rate
-        discount_factor = 1 / (1 + effective_rate * (days_to_maturity / 365))
-        pv = deposit.balance * discount_factor
-        return pv
-    return 0.0 # Fallback
+        payment_periods_per_year = get_periods_per_year(deposit.payment_frequency)
+        if payment_periods_per_year == 0: # Should not happen for CD with payment frequency
+            interval_days = (deposit.maturity_date - deposit.open_date).days # Assume interest paid at maturity
+        else:
+            interval_days = 365 / payment_periods_per_year
+
+        next_payment_date = deposit.open_date
+        while next_payment_date <= today:
+            next_payment_date += timedelta(days=interval_days)
+
+        if next_payment_date <= today:
+            next_payment_date = today + timedelta(days=interval_days)
+
+        while next_payment_date <= deposit.maturity_date:
+            interest_expense = current_balance * deposit.interest_rate * (interval_days / 365.0)
+            cashflows.append((next_payment_date, -interest_expense)) # Negative for expense
+            next_payment_date += timedelta(days=interval_days)
+
+        if include_principal:
+            cashflows.append((deposit.maturity_date, -current_balance)) # Principal outflow at maturity
+        
+        return cashflows
+
+    # Handle Non-Maturity Deposits (Checking/Savings)
+    elif deposit.type in ["Checking", "Savings"]:
+        conceptual_maturity_date = today + timedelta(days=365 * nmd_effective_maturity_years)
+        
+        repricing_freq_days = 365 / get_periods_per_year(deposit.repricing_frequency) if deposit.repricing_frequency else 30
+        
+        base_market_rate_for_nmd = interpolate_rate(BASE_YIELD_CURVE, repricing_freq_days)
+        shocked_market_rate_for_nmd = interpolate_rate(yield_curve, repricing_freq_days)
+        
+        market_rate_change = shocked_market_rate_for_nmd - base_market_rate_for_nmd
+        
+        effective_rate = deposit.interest_rate + (market_rate_change * nmd_deposit_beta)
+        effective_rate = max(0.0001, effective_rate) # Small floor
+
+        pay_freq_days = 365 / get_periods_per_year(deposit.payment_frequency) if deposit.payment_frequency else 30
+
+        next_payment_date = today + timedelta(days=pay_freq_days)
+        
+        projection_end_date = conceptual_maturity_date if include_principal else today + timedelta(days=NII_HORIZON_DAYS)
+
+        while next_payment_date <= projection_end_date:
+            interest_expense = current_balance * effective_rate * (pay_freq_days / 365.0)
+            cashflows.append((next_payment_date, -interest_expense)) # Negative for expense
+            next_payment_date += timedelta(days=pay_freq_days)
+        
+        if include_principal:
+            cashflows.append((conceptual_maturity_date, -current_balance)) # Principal outflow
+        
+        return cashflows
+
+    return []
+
 
 def calculate_derivative_pv(derivative: models.Derivative, yield_curve: Dict[str, float], today: date) -> float:
     """
@@ -145,175 +269,146 @@ def calculate_derivative_pv(derivative: models.Derivative, yield_curve: Dict[str
     applied to notional for remaining term.
     """
     if derivative.type != "Interest Rate Swap":
-        return 0.0 # Only handling swaps for now
+        return 0.0
 
-    days_to_end = (derivative.end_date - today).days
-    if days_to_end <= 0:
-        return 0.0 # Matured derivative
+    if derivative.end_date <= today:
+        return 0.0
 
-    # Interpolate current floating rate based on remaining term
-    current_floating_rate = interpolate_rate(yield_curve, days_to_end) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
+    remaining_days = (derivative.end_date - today).days
+    remaining_years = remaining_days / 365.0
+
+    if remaining_years <= 0:
+        return 0.0
+
+    current_floating_rate_for_valuation = interpolate_rate(yield_curve, remaining_days) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
 
     fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
 
-    # Simplified net interest differential per year
-    if derivative.subtype == "Payer Swap": # Bank pays fixed, receives floating
-        net_rate_diff = current_floating_rate - fixed_rate
-    elif derivative.subtype == "Receiver Swap": # Bank receives fixed, pays floating
-        net_rate_diff = fixed_rate - current_floating_rate
+    if derivative.subtype == "Payer Swap":
+        net_rate_diff = current_floating_rate_for_valuation - fixed_rate
+    elif derivative.subtype == "Receiver Swap":
+        net_rate_diff = fixed_rate - current_floating_rate_for_valuation
     else:
         net_rate_diff = 0
 
-    # Approximate PV: Notional * (Net Rate Diff) * Remaining Years, discounted
-    remaining_years = days_to_end / 365.0
+    discount_rate = interpolate_rate(yield_curve, remaining_days)
     
-    # Use interpolated rate for discounting
-    discount_rate = interpolate_rate(yield_curve, days_to_end)
     discount_factor = 1 / (1 + discount_rate * remaining_years)
 
     pv = derivative.notional * net_rate_diff * remaining_years * discount_factor
     return pv
 
 
-# --- Existing Functions (Adapted for new models) ---
-
 def get_bucket(item_date: date, today: date, buckets: Dict[str, int]) -> str:
     """Assigns an item to a time bucket based on its date relative to today."""
     if item_date is None:
-        return "Non-Sensitive / Undefined" # For items without a clear repricing/maturity date
+        return "Non-Sensitive / Undefined"
 
     days_diff = (item_date - today).days
 
-    for bucket_name, days_limit in buckets.items():
-        if days_limit == -1: # Represents ">X days" or "Longer" bucket
-            # For the last bucket (e.g., ">5 Years"), check if days_diff is greater than the previous bucket's upper limit
-            # This logic assumes buckets are ordered from shortest to longest
-            previous_bucket_limit = 0
-            found_previous = False
-            for prev_name, prev_limit in buckets.items():
-                if prev_name == bucket_name:
-                    break
-                previous_bucket_limit = prev_limit
-                found_previous = True
-            
-            if days_diff > previous_bucket_limit:
-                return bucket_name
+    sorted_buckets = sorted(buckets.items(), key=lambda item: item[1])
+
+    for bucket_name, days_limit in sorted_buckets:
+        if days_limit == -1:
+            continue
         elif days_diff <= days_limit:
             return bucket_name
-    return "Non-Sensitive / Undefined" # Fallback for dates beyond defined buckets
+    
+    if sorted_buckets and days_diff > sorted_buckets[-1][1]:
+        return sorted_buckets[-1][0]
+    
+    return "Non-Sensitive / Undefined"
 
 
-def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, float]) -> Dict[str, Any]:
+def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, float], 
+                                    nmd_effective_maturity_years: int = 5, 
+                                    nmd_deposit_beta: float = 0.5,
+                                    prepayment_rate: float = 0.0) -> Dict[str, Any]:
     """
-    Calculates Net Interest Income (NII) and Economic Value of Equity (EVE)
-    based on data from the database for a given yield curve.
-    This is a simplified calculation for demonstration purposes.
+    Calculates Net Interest Income (NII) over NII_HORIZON_DAYS and Economic Value of Equity (EVE)
+    based on data from the database for a given yield curve and NMD/Prepayment assumptions.
     """
     loans = db_session.query(models.Loan).all()
     deposits = db_session.query(models.Deposit).all()
     derivatives = db_session.query(models.Derivative).all()
 
-    # Get column names for each model to filter DataFrame rows
-    loan_cols = {col.name for col in models.Loan.__table__.columns}
-    deposit_cols = {col.name for col in models.Deposit.__table__.columns}
-    derivative_cols = {col.name for col in models.Derivative.__table__.columns}
-
-    # When converting SQLAlchemy objects to DataFrames, filter out internal attributes
-    loans_data = [
-        {k: v for k, v in loan.__dict__.items() if not k.startswith('_sa_')}
-        for loan in loans
-    ]
-    deposits_data = [
-        {k: v for k, v in deposit.__dict__.items() if not k.startswith('_sa_')}
-        for deposit in deposits
-    ]
-    derivatives_data = [
-        {k: v for k, v in derivative.__dict__.items() if not k.startswith('_sa_')}
-        for derivative in derivatives
-    ]
-
-    loans_df = pd.DataFrame(loans_data)
-    deposits_df = pd.DataFrame(deposits_data)
-    derivatives_df = pd.DataFrame(derivatives_data)
-
     today = date.today()
+    nii_horizon_date = today + timedelta(days=NII_HORIZON_DAYS)
 
-    # --- NII Calculation (Scenario-sensitive) ---
-    total_loan_interest_income = 0.0
-    if not loans_df.empty:
-        loans_df['effective_rate'] = loans_df.apply(
-            lambda row: row['interest_rate'] if row['type'] == 'Fixed Rate Loan' else (
-                interpolate_rate(yield_curve, (row['next_repricing_date'] - today).days if pd.notna(row['next_repricing_date']) else 365) + (row['spread'] if pd.notna(row['spread']) else 0)
-            ),
-            axis=1
-        )
-        total_loan_interest_income = (loans_df['notional'] * loans_df['effective_rate']).sum()
+    # --- NII Calculation (over NII_HORIZON_DAYS) ---
+    total_nii_income = 0.0
+    total_nii_expense = 0.0
 
-    total_deposit_interest_expense = 0.0
-    if not deposits_df.empty:
-        deposits_df['effective_rate'] = deposits_df.apply(
-            lambda row: row['interest_rate'] if row['type'] == 'CD' else (
-                interpolate_rate(yield_curve, (row['next_repricing_date'] - today).days if pd.notna(row['next_repricing_date']) else 30) # Assume 1M for non-maturity repricing
-            ),
-            axis=1
-        )
-        total_deposit_interest_expense = (deposits_df['balance'] * deposits_df['effective_rate']).sum()
+    for loan in loans:
+        loan_cfs = generate_loan_cashflows(loan, yield_curve, today, include_principal=False, prepayment_rate=prepayment_rate)
+        for cf_date, cf_amount in loan_cfs:
+            if today < cf_date <= nii_horizon_date:
+                total_nii_income += cf_amount
 
-    net_interest_income = total_loan_interest_income - total_deposit_interest_expense
+    for deposit in deposits:
+        deposit_cfs = generate_deposit_cashflows(deposit, yield_curve, today, include_principal=False,
+                                                 nmd_effective_maturity_years=nmd_effective_maturity_years,
+                                                 nmd_deposit_beta=nmd_deposit_beta)
+        for cf_date, cf_amount in deposit_cfs:
+            if today < cf_date <= nii_horizon_date:
+                total_nii_expense += abs(cf_amount)
 
-    # --- EVE Calculation ---
+    for derivative in derivatives:
+        if derivative.type == "Interest Rate Swap" and derivative.start_date <= today and derivative.end_date > today:
+            fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
+            floating_rate_for_nii = interpolate_rate(yield_curve, 365) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
+
+            if derivative.subtype == "Payer Swap":
+                net_annual_interest = (floating_rate_for_nii - fixed_rate) * derivative.notional
+            elif derivative.subtype == "Receiver Swap":
+                net_annual_interest = (fixed_rate - floating_rate_for_nii) * derivative.notional
+            else:
+                net_annual_interest = 0
+
+            if (derivative.end_date - today).days > 0:
+                proration_factor = min(1.0, (min(derivative.end_date, nii_horizon_date) - today).days / 365.0)
+                total_nii_income += net_annual_interest * proration_factor
+
+    net_interest_income = total_nii_income - total_nii_expense
+
+    # --- EVE Calculation (Present Value of all future cash flows) ---
     total_pv_assets = 0.0
     total_pv_liabilities = 0.0
     total_pv_derivatives = 0.0
 
-    if not loans_df.empty:
-        for index, row in loans_df.iterrows():
-            # Filter row.to_dict() to only include actual model columns
-            clean_row_dict = {k: v for k, v in row.to_dict().items() if k in loan_cols}
-            loan_obj = models.Loan(**clean_row_dict)
-            total_pv_assets += calculate_loan_pv(loan_obj, yield_curve, today)
-    
-    if not deposits_df.empty:
-        for index, row in deposits_df.iterrows():
-            # Filter row.to_dict() to only include actual model columns
-            clean_row_dict = {k: v for k, v in row.to_dict().items() if k in deposit_cols}
-            deposit_obj = models.Deposit(**clean_row_dict)
-            total_pv_liabilities += calculate_deposit_pv(deposit_obj, yield_curve, today)
+    for loan in loans:
+        loan_cfs = generate_loan_cashflows(loan, yield_curve, today, include_principal=True, prepayment_rate=prepayment_rate)
+        total_pv_assets += calculate_pv_of_cashflows(loan_cfs, yield_curve, today)
 
-    if not derivatives_df.empty:
-        for index, row in derivatives_df.iterrows():
-            # Filter row.to_dict() to only include actual model columns
-            clean_row_dict = {k: v for k, v in row.to_dict().items() if k in derivative_cols}
-            derivative_obj = models.Derivative(**clean_row_dict)
-            total_pv_derivatives += calculate_derivative_pv(derivative_obj, yield_curve, today)
+    for deposit in deposits:
+        deposit_cfs = generate_deposit_cashflows(deposit, yield_curve, today, include_principal=True,
+                                                 nmd_effective_maturity_years=nmd_effective_maturity_years,
+                                                 nmd_deposit_beta=nmd_deposit_beta)
+        total_pv_liabilities += calculate_pv_of_cashflows(deposit_cfs, yield_curve, today)
 
-    eve_value = total_pv_assets - total_pv_liabilities + total_pv_derivatives
+    for derivative in derivatives:
+        total_pv_derivatives += calculate_derivative_pv(derivative, yield_curve, today)
+
+    eve_value = total_pv_assets + total_pv_liabilities + total_pv_derivatives
 
     return {
         "net_interest_income": net_interest_income,
         "economic_value_of_equity": eve_value,
         "total_assets_value": total_pv_assets,
-        "total_liabilities_value": total_pv_liabilities,
-        "total_derivatives_value": total_pv_derivatives # New: PV of derivatives
+        "total_liabilities_value": abs(total_pv_liabilities),
+        "total_derivatives_value": total_pv_derivatives
     }
 
 
 def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
     """
     Calculates NII Repricing Gap and EVE Maturity Gap.
+    This still uses the repricing/maturity dates from the instruments directly,
+    as gap analysis is typically based on contractual or first repricing dates.
     """
     loans = db.query(models.Loan).all()
     deposits = db.query(models.Deposit).all()
-    derivatives = db.query(models.Derivative).all() # Fetch derivatives
-
-    # Filter out _sa_instance_state before creating DataFrames
-    loans_data = [{k: v for k, v in loan.__dict__.items() if not k.startswith('_sa_')} for loan in loans]
-    deposits_data = [{k: v for k, v in deposit.__dict__.items() if not k.startswith('_sa_')} for deposit in deposits]
-    derivatives_data = [{k: v for k, v in derivative.__dict__.items() if not k.startswith('_sa_')} for derivative in derivatives]
-
-    loans_df = pd.DataFrame(loans_data)
-    deposits_df = pd.DataFrame(deposits_data)
-    derivatives_df = pd.DataFrame(derivatives_data)
+    derivatives = db.query(models.Derivative).all()
 
     today = date.today()
 
@@ -323,46 +418,57 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
         "3-6 Months": 180,
         "6-12 Months": 365,
         "1-5 Years": 365 * 5,
-        ">5 Years": 365 * 100, # Effectively "longer"
-        "Fixed Rate / Non-Sensitive": -1 # Special bucket for fixed or non-repricing items
+        ">5 Years": 365 * 100,
+        "Fixed Rate / Non-Sensitive": -1
     }
-    nii_bucket_order = list(nii_buckets_def.keys())
+    nii_bucket_order = ["0-3 Months", "3-6 Months", "6-12 Months", "1-5 Years", ">5 Years", "Fixed Rate / Non-Sensitive"]
 
     nii_gap_data: Dict[str, Dict[str, float]] = {
         bucket: {"assets": 0.0, "liabilities": 0.0, "gap": 0.0}
         for bucket in nii_bucket_order
     }
 
-    # Process Loans for NII Gap
-    if not loans_df.empty:
-        for index, row in loans_df.iterrows():
-            if row['type'] == "Fixed Rate Loan" or pd.isna(row.get('next_repricing_date')): # Use .get() for safety
-                bucket_name = "Fixed Rate / Non-Sensitive"
+    for loan in loans:
+        if loan.type == "Fixed Rate Loan" or not loan.next_repricing_date:
+            bucket_name = "Fixed Rate / Non-Sensitive"
+        else:
+            bucket_name = get_bucket(loan.next_repricing_date, today, nii_buckets_def)
+        nii_gap_data[bucket_name]["assets"] += loan.notional
+
+    for deposit in deposits:
+        if deposit.type == "CD":
+            if deposit.maturity_date:
+                bucket_name = get_bucket(deposit.maturity_date, today, nii_buckets_def)
             else:
-                bucket_name = get_bucket(row['next_repricing_date'], today, nii_buckets_def)
-            
-            nii_gap_data[bucket_name]["assets"] += row['notional']
-
-    # Process Deposits for NII Gap
-    if not deposits_df.empty:
-        for index, row in deposits_df.iterrows():
-            # Use .get() for safety as next_repricing_date might not exist for all deposit types
-            if pd.isna(row.get('next_repricing_date')) and pd.isna(row.get('maturity_date')): # Assume non-repricing
                 bucket_name = "Fixed Rate / Non-Sensitive"
-            elif row['type'] == "CD" and pd.notna(row.get('maturity_date')): # CDs reprice at maturity
-                bucket_name = get_bucket(row['maturity_date'], today, nii_buckets_def)
-            elif pd.notna(row.get('next_repricing_date')): # Other deposits with repricing
-                 bucket_name = get_bucket(row['next_repricing_date'], today, nii_buckets_def)
+        elif deposit.type in ["Checking", "Savings"]:
+            if deposit.next_repricing_date:
+                bucket_name = get_bucket(deposit.next_repricing_date, today, nii_buckets_def)
             else:
-                bucket_name = "Fixed Rate / Non-Sensitive" # Fallback
-            
-            nii_gap_data[bucket_name]["liabilities"] += row['balance']
+                bucket_name = "Fixed Rate / Non-Sensitive"
+        else:
+            bucket_name = "Fixed Rate / Non-Sensitive"
+        nii_gap_data[bucket_name]["liabilities"] += deposit.balance
 
-    # Derivatives also have repricing characteristics, but for NII gap, it's more complex
-    # For simplicity, we'll exclude them from NII repricing gap for now.
-    # A full NII gap would require analyzing the fixed vs floating legs' repricing.
+    for derivative in derivatives:
+        if derivative.type == "Interest Rate Swap":
+            repricing_freq_days = 0
+            if derivative.floating_payment_frequency == "Monthly": repricing_freq_days = 30
+            elif derivative.floating_payment_frequency == "Quarterly": repricing_freq_days = 90
+            elif derivative.floating_payment_frequency == "Semi-Annually": repricing_freq_days = 182
+            elif derivative.floating_payment_frequency == "Annually": repricing_freq_days = 365
 
-    # Calculate NII Gap
+            if repricing_freq_days > 0:
+                next_repricing_date = today + timedelta(days=repricing_freq_days)
+                bucket_name = get_bucket(next_repricing_date, today, nii_buckets_def)
+                
+                if derivative.subtype == "Payer Swap":
+                    nii_gap_data[bucket_name]["assets"] += derivative.notional
+                elif derivative.subtype == "Receiver Swap":
+                    nii_gap_data[bucket_name]["liabilities"] += derivative.notional
+            else:
+                nii_gap_data["Fixed Rate / Non-Sensitive"]["assets"] += derivative.notional
+
     nii_gap_results = []
     for bucket in nii_bucket_order:
         assets = nii_gap_data[bucket]["assets"]
@@ -376,45 +482,34 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
         "1-3 Years": 365 * 3,
         "3-5 Years": 365 * 5,
         "5-10 Years": 365 * 10,
-        ">10 Years": 365 * 100, # Effectively "longer"
-        "Non-Maturity": -1 # Special bucket for non-maturity deposits (checking/savings)
+        ">10 Years": 365 * 100,
+        "Non-Maturity": -1
     }
-    eve_bucket_order = list(eve_buckets_def.keys())
+    eve_bucket_order = ["0-1 Year", "1-3 Years", "3-5 Years", "5-10 Years", ">10 Years", "Non-Maturity"]
 
     eve_gap_data: Dict[str, Dict[str, float]] = {
         bucket: {"assets": 0.0, "liabilities": 0.0, "gap": 0.0}
         for bucket in eve_bucket_order
     }
 
-    # Process Loans for EVE Gap (based on maturity)
-    if not loans_df.empty:
-        for index, row in loans_df.iterrows():
-            bucket_name = get_bucket(row['maturity_date'], today, eve_buckets_def)
-            eve_gap_data[bucket_name]["assets"] += row['notional']
+    for loan in loans:
+        bucket_name = get_bucket(loan.maturity_date, today, eve_buckets_def)
+        eve_gap_data[bucket_name]["assets"] += loan.notional
 
-    # Process Deposits for EVE Gap (based on maturity)
-    if not deposits_df.empty:
-        for index, row in deposits_df.iterrows():
-            if row['type'] == "CD" and pd.notna(row.get('maturity_date')): # Use .get() for safety
-                bucket_name = get_bucket(row['maturity_date'], today, eve_buckets_def)
-            else: # Checking/Savings are non-maturity deposits
-                bucket_name = "Non-Maturity"
-            eve_gap_data[bucket_name]["liabilities"] += row['balance']
+    for deposit in deposits:
+        if deposit.type == "CD" and deposit.maturity_date:
+            bucket_name = get_bucket(deposit.maturity_date, today, eve_buckets_def)
+        else:
+            bucket_name = "Non-Maturity"
+        eve_gap_data[bucket_name]["liabilities"] += deposit.balance
 
-    # Derivatives for EVE Gap (based on end_date)
-    if not derivatives_df.empty:
-        for index, row in derivatives_df.iterrows():
-            bucket_name = get_bucket(row['end_date'], today, eve_buckets_def)
-            # Derivatives can be assets or liabilities depending on their PV.
-            # For simplicity, we'll assign their notional to assets/liabilities based on subtype
-            # A more accurate approach would be to assign their PV to the gap bucket.
-            if row['subtype'] == "Payer Swap": # Bank pays fixed, receives floating (often asset-like if rates rise)
-                eve_gap_data[bucket_name]["assets"] += row['notional']
-            elif row['subtype'] == "Receiver Swap": # Bank receives fixed, pays floating (often liability-like if rates rise)
-                eve_gap_data[bucket_name]["liabilities"] += row['notional']
+    for derivative in derivatives:
+        bucket_name = get_bucket(derivative.end_date, today, eve_buckets_def)
+        if derivative.subtype == "Payer Swap":
+            eve_gap_data[bucket_name]["assets"] += derivative.notional
+        elif derivative.subtype == "Receiver Swap":
+            eve_gap_data[bucket_name]["liabilities"] += derivative.notional
 
-
-    # Calculate EVE Gap
     eve_gap_results = []
     for bucket in eve_bucket_order:
         assets = eve_gap_data[bucket]["assets"]
@@ -428,10 +523,11 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
     }
 
 
-def generate_dashboard_data_from_db(db: Session) -> schemas.DashboardData:
+def generate_dashboard_data_from_db(db: Session, assumptions: schemas.CalculationAssumptions) -> schemas.DashboardData:
     """
     Generates dashboard data by fetching from DB and performing calculations,
     including scenario-based EVE/NII and portfolio composition.
+    Accepts NMD behavioral and prepayment assumptions.
     """
     global _scenario_history
 
@@ -467,8 +563,13 @@ def generate_dashboard_data_from_db(db: Session) -> schemas.DashboardData:
     for scenario_name, shock_bps in INTEREST_RATE_SCENARIOS.items():
         shocked_curve = shock_yield_curve(BASE_YIELD_CURVE, shock_bps)
         
-        # Calculate NII and EVE for the current shocked curve
-        metrics_for_curve = calculate_nii_and_eve_for_curve(db, shocked_curve)
+        # Pass all assumptions to the calculation function
+        metrics_for_curve = calculate_nii_and_eve_for_curve(
+            db, shocked_curve,
+            nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
+            nmd_deposit_beta=assumptions.nmd_deposit_beta,
+            prepayment_rate=assumptions.prepayment_rate
+        )
         
         eve_scenario_results.append(schemas.EVEScenarioResult(
             scenario_name=scenario_name,
@@ -484,14 +585,13 @@ def generate_dashboard_data_from_db(db: Session) -> schemas.DashboardData:
             base_case_nii = metrics_for_curve["net_interest_income"]
             total_assets_value_base = metrics_for_curve["total_assets_value"]
             total_liabilities_value_base = metrics_for_curve["total_liabilities_value"]
-            portfolio_value_base = total_assets_value_base - total_liabilities_value_base + metrics_for_curve["total_derivatives_value"]
+            portfolio_value_base = total_assets_value_base + total_liabilities_value_base + metrics_for_curve["total_derivatives_value"]
 
 
     # --- Calculate Sensitivities ---
     eve_sensitivity = 0.0
     nii_sensitivity = 0.0
 
-    # Find the "Parallel Up +200bps" scenario for sensitivity calculation
     eve_up_200bps = next((res.eve_value for res in eve_scenario_results if res.scenario_name == "Parallel Up +200bps"), None)
     nii_up_200bps = next((res.nii_value for res in nii_scenario_results if res.scenario_name == "Parallel Up +200bps"), None)
 
@@ -514,7 +614,7 @@ def generate_dashboard_data_from_db(db: Session) -> schemas.DashboardData:
     now = datetime.now()
     new_scenario_point = {
         "time": now.strftime("%H:%M:%S"),
-        "Base Case": base_case_eve, # Use actual calculated base case EVE
+        "Base Case": base_case_eve,
         "+200bps": next((res.eve_value for res in eve_scenario_results if res.scenario_name == "Parallel Up +200bps"), base_case_eve),
         "-200bps": next((res.eve_value for res in eve_scenario_results if res.scenario_name == "Parallel Down -200bps"), base_case_eve),
     }
@@ -539,8 +639,9 @@ def generate_dashboard_data_from_db(db: Session) -> schemas.DashboardData:
         nii_repricing_gap=gap_analysis_metrics["nii_repricing_gap"],
         eve_maturity_gap=gap_analysis_metrics["eve_maturity_gap"],
         eve_scenarios=eve_scenario_results,
-        nii_scenarios=nii_scenario_results, # NEW
-        loan_composition=loan_composition, # NEW
-        deposit_composition=deposit_composition, # NEW
-        derivative_composition=derivative_composition # NEW
+        nii_scenarios=nii_scenario_results,
+        loan_composition=loan_composition,
+        deposit_composition=deposit_composition,
+        derivative_composition=derivative_composition,
+        current_assumptions=assumptions # Pass assumptions back to frontend
     )

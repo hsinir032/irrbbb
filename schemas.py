@@ -1,43 +1,46 @@
 # schemas.py
-from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from pydantic import BaseModel, Field
+from typing import List, Dict, Optional
 from datetime import date
 
-# --- Pydantic Models for API Request/Response ---
-
-# Loan Schemas
+# --- Instrument Schemas ---
 class LoanBase(BaseModel):
     instrument_id: str
-    type: str
+    type: str # e.g., "Fixed Rate Loan", "Floating Rate Loan"
     notional: float
-    interest_rate: Optional[float] = None # Can be None for floating
+    interest_rate: Optional[float] = None # For fixed rate loans
     maturity_date: date
     origination_date: date
-    benchmark_rate_type: Optional[str] = None
+    
+    # For floating rate loans
+    benchmark_rate_type: Optional[str] = None # e.g., "SOFR", "Prime"
     spread: Optional[float] = None
-    repricing_frequency: Optional[str] = None
+    repricing_frequency: Optional[str] = None # e.g., "Monthly", "Quarterly", "Annually"
     next_repricing_date: Optional[date] = None
-    payment_frequency: Optional[str] = None # New
+    payment_frequency: str # e.g., "Monthly", "Quarterly", "Semi-Annually", "Annually"
 
 class LoanCreate(LoanBase):
     pass
 
 class LoanResponse(LoanBase):
-    id: int
+    id: int # Database ID
     class Config:
         from_attributes = True
 
-# Deposit Schemas
 class DepositBase(BaseModel):
     instrument_id: str
-    type: str
+    type: str # e.g., "Checking", "Savings", "CD"
     balance: float
-    interest_rate: float
+    interest_rate: float # Current rate paid
     open_date: date
+    
+    # For CDs
     maturity_date: Optional[date] = None
-    repricing_frequency: Optional[str] = None
-    next_repricing_date: Optional[date] = None
-    payment_frequency: Optional[str] = None # New
+    payment_frequency: Optional[str] = None # For CDs
+
+    # For Checking/Savings (NMDs)
+    repricing_frequency: Optional[str] = None # e.g., "Monthly", "Quarterly" for NMDs
+    next_repricing_date: Optional[date] = None # Next date for rate review/change
 
 class DepositCreate(DepositBase):
     pass
@@ -47,16 +50,15 @@ class DepositResponse(DepositBase):
     class Config:
         from_attributes = True
 
-# Derivative Schemas (NEW)
 class DerivativeBase(BaseModel):
     instrument_id: str
-    type: str
-    subtype: str
+    type: str # e.g., "Interest Rate Swap"
+    subtype: str # e.g., "Payer Swap", "Receiver Swap"
     notional: float
     start_date: date
     end_date: date
     fixed_rate: Optional[float] = None
-    floating_rate_index: Optional[str] = None
+    floating_rate_index: Optional[str] = None # e.g., "SOFR", "LIBOR"
     floating_spread: Optional[float] = None
     fixed_payment_frequency: Optional[str] = None
     floating_payment_frequency: Optional[str] = None
@@ -69,41 +71,57 @@ class DerivativeResponse(DerivativeBase):
     class Config:
         from_attributes = True
 
-# Gap Analysis Schemas (existing)
+# --- Dashboard Data Schemas ---
+class YieldCurvePoint(BaseModel):
+    name: str # Tenor, e.g., "1Y", "5Y"
+    yield: float # Yield in percentage
+
+class ScenarioDataPoint(BaseModel):
+    time: str # Timestamp for historical data
+    # Dynamic fields for scenario values, e.g., "Base Case", "+200bps"
+    **data: float # Allows for dynamic keys like 'Base Case', '+200bps'
+
 class GapBucket(BaseModel):
     bucket: str
     assets: float
     liabilities: float
-    gap: float # assets - liabilities
+    gap: float
 
-# New: EVE Scenario Result
 class EVEScenarioResult(BaseModel):
     scenario_name: str
     eve_value: float
 
-# New: NII Scenario Result (for scenario-based NII)
 class NIIScenarioResult(BaseModel):
     scenario_name: str
     nii_value: float
 
-# Dashboard Data Schema (UPDATED for EVE scenarios, NII scenarios, and portfolio composition)
+# Updated Schema for NMD and Prepayment Assumptions
+class CalculationAssumptions(BaseModel):
+    nmd_effective_maturity_years: int = Field(5, description="Effective maturity in years for Non-Maturity Deposits (NMDs) for EVE calculation.")
+    nmd_deposit_beta: float = Field(0.5, description="Deposit beta (0-1) for NMD interest rate sensitivity.")
+    prepayment_rate: float = Field(0.0, ge=0.0, le=1.0, description="Annual prepayment rate (CPR) for loans (0-1).")
+
+
 class DashboardData(BaseModel):
-    eve_sensitivity: float # This will be calculated, not random
-    nii_sensitivity: float # This will be calculated, not random
+    eve_sensitivity: float
+    nii_sensitivity: float
     portfolio_value: float
-    yield_curve_data: List[Dict[str, Any]]
-    scenario_data: List[Dict[str, Any]] # This is for the historical EVE chart
+    yield_curve_data: List[YieldCurvePoint]
+    scenario_data: List[ScenarioDataPoint]
     total_loans: int
     total_deposits: int
     total_derivatives: int
     total_assets_value: float
     total_liabilities_value: float
-    net_interest_income: float # This will be the base case NII
-    economic_value_of_equity: float # This will be the base case EVE
+    net_interest_income: float
+    economic_value_of_equity: float
     nii_repricing_gap: List[GapBucket]
     eve_maturity_gap: List[GapBucket]
-    eve_scenarios: List[EVEScenarioResult] # EVE results for all 6 scenarios
-    nii_scenarios: List[NIIScenarioResult] # NEW: NII results for all 6 scenarios
-    loan_composition: Dict[str, float] # NEW: Breakdown of loans by type/subtype
-    deposit_composition: Dict[str, float] # NEW: Breakdown of deposits by type/subtype
-    derivative_composition: Dict[str, float] # NEW: Breakdown of derivatives by type/subtype
+    eve_scenarios: List[EVEScenarioResult]
+    nii_scenarios: List[NIIScenarioResult]
+    loan_composition: Dict[str, float]
+    deposit_composition: Dict[str, float]
+    derivative_composition: Dict[str, float]
+    # Include the current assumptions in the response for the frontend to display
+    current_assumptions: CalculationAssumptions
+

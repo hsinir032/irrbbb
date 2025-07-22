@@ -1,5 +1,5 @@
 # main.py
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Generator, Optional
@@ -15,10 +15,10 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
 # --- Import from local modules ---
-import models # Import the models module directly
-import schemas # Import the schemas module directly
-import crud # Import the new crud module
-from calculations import generate_dashboard_data_from_db # Import the main data generation function
+import models
+import schemas
+import crud
+from calculations import generate_dashboard_data_from_db
 
 # --- FastAPI App Initialization ---
 app = FastAPI(
@@ -135,7 +135,7 @@ def on_startup():
             if deposit_type == "CD":
                 maturity_date = open_date + timedelta(days=random.randint(90, 730)) # 3 months to 2 years
                 payment_frequency = random.choice(["Monthly", "Quarterly", "Semi-Annually", "Annually"])
-            elif deposit_type in ["Savings", "Checking"]:
+            elif deposit_type in ["Checking", "Savings"]:
                 repricing_frequency = random.choice(["Monthly", "Quarterly"])
                 if repricing_frequency == "Monthly":
                     next_repricing_date = current_date + timedelta(days=random.randint(0, 30))
@@ -200,12 +200,23 @@ def on_startup():
 
 # --- API Endpoints ---
 @app.get("/api/v1/dashboard/live-data", response_model=schemas.DashboardData)
-async def get_live_dashboard_data(db: Session = Depends(get_db)):
+async def get_live_dashboard_data(
+    db: Session = Depends(get_db),
+    nmd_effective_maturity_years: int = Query(5, ge=1, le=30, description="Effective maturity in years for Non-Maturity Deposits (NMDs) for EVE calculation."),
+    nmd_deposit_beta: float = Query(0.5, ge=0.0, le=1.0, description="Deposit beta (0-1) for NMD interest rate sensitivity."),
+    prepayment_rate: float = Query(0.0, ge=0.0, le=1.0, description="Annual prepayment rate (CPR) for loans (0-1).")
+):
     """
     Fetches live IRRBB dashboard data, calculated from database instruments
     including scenario-based EVE/NII and portfolio composition.
+    Allows for configurable NMD behavioral and prepayment assumptions.
     """
-    return generate_dashboard_data_from_db(db)
+    assumptions = schemas.CalculationAssumptions(
+        nmd_effective_maturity_years=nmd_effective_maturity_years,
+        nmd_deposit_beta=nmd_deposit_beta,
+        prepayment_rate=prepayment_rate
+    )
+    return generate_dashboard_data_from_db(db, assumptions)
 
 # --- LOAN Endpoints (using crud.py) ---
 @app.get("/api/v1/loans", response_model=List[schemas.LoanResponse])
