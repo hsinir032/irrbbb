@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
 import models_dashboard, schemas_dashboard
+from datetime import date
 
 def save_dashboard_metric(db: Session, metric: schemas_dashboard.DashboardMetricCreate):
     record = models_dashboard.DashboardMetric(**metric.dict())
@@ -43,3 +44,9 @@ def get_bucket_constituents(db: Session, scenario: str, bucket: str):
 
 def get_portfolio_composition(db: Session):
     return db.query(models_dashboard.PortfolioComposition).all()
+
+def delete_eve_drivers_for_scenario_and_date(db: Session, scenario: str, timestamp: date):
+    db.query(models_dashboard.EveDriver).filter(
+        models_dashboard.EveDriver.scenario == scenario
+    ).delete(synchronize_session=False)
+    db.commit()
