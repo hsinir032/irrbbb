@@ -18,7 +18,7 @@ class EveDriverCreate(BaseModel):
     instrument_id: str
     instrument_type: str
     base_pv: float
-    shocked_pv: float
+    shocked_pv: Optional[float] = None
     duration: Optional[float] = None
 
 class RepricingBucketCreate(BaseModel):
