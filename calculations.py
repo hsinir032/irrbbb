@@ -641,52 +641,43 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         portfolio_value=portfolio_value_base
     ))
     
+    # Save EVE drivers for all scenarios
     eve_driver_records = []
-    for loan in loans:
-        base_pv = calculate_pv_of_cashflows(
-            generate_loan_cashflows(loan, BASE_YIELD_CURVE, today, include_principal=True, prepayment_rate=assumptions.prepayment_rate),
-            BASE_YIELD_CURVE, today
-        )
-        shocked_pv = calculate_pv_of_cashflows(
-            generate_loan_cashflows(loan, shock_yield_curve(BASE_YIELD_CURVE, INTEREST_RATE_SCENARIOS["Parallel Up +200bps"]),
-                                    today, include_principal=True, prepayment_rate=assumptions.prepayment_rate),
-            shock_yield_curve(BASE_YIELD_CURVE, INTEREST_RATE_SCENARIOS["Parallel Up +200bps"]), today
-        )
-        eve_driver_records.append(EveDriverCreate(
-           scenario="Parallel Up +200bps",
-           instrument_id=str(loan.id),
-           instrument_type="Loan",
-           base_pv=base_pv,
-           shocked_pv=shocked_pv,
-           duration=None  # Optional: add if you have
-        ))
-
-    # Repeat for deposits
-    for deposit in deposits:
-        base_pv = calculate_pv_of_cashflows(
-            generate_deposit_cashflows(deposit, BASE_YIELD_CURVE, today, include_principal=True,
-                                   nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
-                                   nmd_deposit_beta=assumptions.nmd_deposit_beta),
-            BASE_YIELD_CURVE, today
-        )
-        shocked_curve = shock_yield_curve(BASE_YIELD_CURVE, INTEREST_RATE_SCENARIOS["Parallel Up +200bps"])
-        shocked_pv = calculate_pv_of_cashflows(
-            generate_deposit_cashflows(deposit, shocked_curve, today, include_principal=True,
-                                       nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
-                                       nmd_deposit_beta=assumptions.nmd_deposit_beta),
-        shocked_curve, today
-    )
-        eve_driver_records.append(EveDriverCreate(
-            scenario="Parallel Up +200bps",
-            instrument_id=str(deposit.id),
-            instrument_type="Deposit",
-            base_pv=base_pv,
-            shocked_pv=shocked_pv,
-            duration=None
-        ))
-
-    # Save EVE drivers always
-    delete_eve_drivers_for_scenario_and_date(db, "Parallel Up +200bps", today)
+    for scenario_name, shock_bps in INTEREST_RATE_SCENARIOS.items():
+        if scenario_name == "Base Case":
+            curve = BASE_YIELD_CURVE
+        else:
+            curve = shock_yield_curve(BASE_YIELD_CURVE, shock_bps)
+        for loan in loans:
+            base_pv = calculate_pv_of_cashflows(
+                generate_loan_cashflows(loan, curve, today, include_principal=True, prepayment_rate=assumptions.prepayment_rate),
+                curve, today
+            )
+            eve_driver_records.append(EveDriverCreate(
+                scenario=scenario_name,
+                instrument_id=str(loan.id),
+                instrument_type="Loan",
+                base_pv=base_pv,
+                shocked_pv=None,
+                duration=None
+            ))
+        for deposit in deposits:
+            base_pv = calculate_pv_of_cashflows(
+                generate_deposit_cashflows(deposit, curve, today, include_principal=True,
+                                           nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
+                                           nmd_deposit_beta=assumptions.nmd_deposit_beta),
+                curve, today
+            )
+            eve_driver_records.append(EveDriverCreate(
+                scenario=scenario_name,
+                instrument_id=str(deposit.id),
+                instrument_type="Deposit",
+                base_pv=base_pv,
+                shocked_pv=None,
+                duration=None
+            ))
+    # Delete and save EVE drivers for all scenarios
+    db.query(EveDriver).delete(synchronize_session=False)
     save_eve_drivers(db, eve_driver_records)
 
     # Save NII drivers (Base Case, per instrument)
