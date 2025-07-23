@@ -685,9 +685,8 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         ))
 
     # Save
-    if assumptions.manual_refresh:
-        delete_eve_drivers_for_scenario_and_date(db, "Parallel Up +200bps", today)
-        save_eve_drivers(db, eve_driver_records)
+    delete_eve_drivers_for_scenario_and_date(db, "Parallel Up +200bps", today)
+    save_eve_drivers(db, eve_driver_records)
 
         save_repricing_buckets(db, repricing_buckets)
 
