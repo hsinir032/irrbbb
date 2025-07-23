@@ -733,17 +733,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         ))
     
     for derivative in derivatives:
-        if not derivative.next_repricing_date:
-            bucket = "Fixed Rate / Non-Sensitive"
-        else:
-            bucket = get_bucket(derivative.next_repricing_date, today, {
-                "0-3 Months": 90,
-                "3-6 Months": 180,
-                "6-12 Months": 365,
-                "1-5 Years": 365 * 5,
-                ">5 Years": 365 * 100,
-                "Fixed Rate / Non-Sensitive": -1
-            })
+        bucket = "Fixed Rate / Non-Sensitive"
         repricing_buckets.append(RepricingBucketCreate(
             scenario="Base Case",
             bucket=bucket,
