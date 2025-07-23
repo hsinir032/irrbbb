@@ -357,7 +357,7 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
                 total_nii_expense += abs(cf_amount)
 
     for derivative in derivatives:
-        if derivative.type == "Interest Rate Swap" and derivative.start_date <= today and derivative.end_date > today:
+        if derivative.type == "Interest Rate Swap" and derivative.start_date <= today and  end_date > today:
             fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
             floating_rate_for_nii = interpolate_rate(yield_curve, 365) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
 
@@ -740,7 +740,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             instrument_id=str(derivative.id),
             instrument_type="Derivative",
             notional=derivative.notional,
-            position="asset" if derivative.pay_receive == "receive" else "liability"
+            position="asset" if derivative.subtype == "Receiver Swap" else "liability"
         ))
 
     save_repricing_buckets(db, repricing_buckets)    
