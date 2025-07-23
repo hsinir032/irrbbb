@@ -174,3 +174,37 @@ async def delete_derivative_endpoint(instrument_id: str, db: Session = Depends(g
 @app.get("/")
 async def root():
     return {"message": "IRRBB Backend is running! Access /docs for API documentation."}
+
+# --- Additional Dashboard Insight Endpoints ---
+from crud_dashboard import (
+    get_latest_dashboard_metrics,
+    get_eve_drivers_for_scenario,
+    get_net_positions_for_scenario,
+    get_bucket_constituents,
+    get_portfolio_composition
+)
+
+@app.get("/api/v1/dashboard/snapshot")
+def get_dashboard_snapshot(db: Session = Depends(get_db)):
+    """Fetches saved dashboard metrics (EVE/NII/etc.) from DB."""
+    return get_latest_dashboard_metrics(db)
+
+@app.get("/api/v1/dashboard/eve-drivers")
+def get_eve_drivers(scenario: str = "Parallel Up +200bps", db: Session = Depends(get_db)):
+    """Fetches PVs of instruments (before/after shock) to explain EVE impact."""
+    return get_eve_drivers_for_scenario(db, scenario)
+
+@app.get("/api/v1/dashboard/net-positions")
+def get_net_positions(scenario: str = "Base Case", db: Session = Depends(get_db)):
+    """Returns net asset/liability positions across repricing buckets."""
+    return get_net_positions_for_scenario(db, scenario)
+
+@app.get("/api/v1/dashboard/bucket-constituents")
+def get_bucket_instruments(scenario: str, bucket: str, db: Session = Depends(get_db)):
+    """Fetches underlying instruments in a repricing bucket."""
+    return get_bucket_constituents(db, scenario, bucket)
+
+@app.get("/api/v1/portfolio/composition")
+def get_portfolio_composition_summary(db: Session = Depends(get_db)):
+    """Returns fixed/floating, maturity, and basis distribution."""
+    return get_portfolio_composition(db)

@@ -9,6 +9,9 @@ import math
 import models
 import schemas
 
+from crud_dashboard import *
+from schemas_dashboard import *
+
 # In-memory store for scenario history (for demonstration)
 _scenario_history: List[Dict[str, Any]] = []
 MAX_SCENARIO_HISTORY = 10
@@ -623,7 +626,183 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
 
     _scenario_history.append(new_scenario_point)
     _scenario_history = _scenario_history[-MAX_SCENARIO_HISTORY:]
+    
+    today = date.today()
+    save_dashboard_metric(db, DashboardMetricCreate(
+        timestamp=today,
+        scenario="Base Case",
+        eve_value=base_case_eve,
+        nii_value=base_case_nii,
+        eve_sensitivity=eve_sensitivity,
+        nii_sensitivity=nii_sensitivity,
+        total_assets_value=total_assets_value_base,
+        total_liabilities_value=total_liabilities_value_base,
+        portfolio_value=portfolio_value_base
+    ))
+    
+    eve_driver_records = []
+    for loan in loans:
+        base_pv = calculate_pv_of_cashflows(
+            generate_loan_cashflows(loan, BASE_YIELD_CURVE, today, include_principal=True, prepayment_rate=assumptions.prepayment_rate),
+            BASE_YIELD_CURVE, today
+        )
+        shocked_pv = calculate_pv_of_cashflows(
+            generate_loan_cashflows(loan, shock_yield_curve(BASE_YIELD_CURVE, INTEREST_RATE_SCENARIOS["Parallel Up +200bps"]),
+                                    today, include_principal=True, prepayment_rate=assumptions.prepayment_rate),
+            shock_yield_curve(BASE_YIELD_CURVE, INTEREST_RATE_SCENARIOS["Parallel Up +200bps"]), today
+        )
+        eve_driver_records.append(EveDriverCreate(
+           scenario="Parallel Up +200bps",
+           instrument_id=str(loan.id),
+           instrument_type="Loan",
+           base_pv=base_pv,
+           shocked_pv=shocked_pv,
+           duration=None  # Optional: add if you have
+        ))
 
+    # Repeat for deposits
+    for deposit in deposits:
+        base_pv = calculate_pv_of_cashflows(
+            generate_deposit_cashflows(deposit, BASE_YIELD_CURVE, today, include_principal=True,
+                                   nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
+                                   nmd_deposit_beta=assumptions.nmd_deposit_beta),
+            BASE_YIELD_CURVE, today
+        )
+        shocked_curve = shock_yield_curve(BASE_YIELD_CURVE, INTEREST_RATE_SCENARIOS["Parallel Up +200bps"])
+        shocked_pv = calculate_pv_of_cashflows(
+            generate_deposit_cashflows(deposit, shocked_curve, today, include_principal=True,
+                                       nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
+                                       nmd_deposit_beta=assumptions.nmd_deposit_beta),
+        shocked_curve, today
+    )
+        eve_driver_records.append(EveDriverCreate(
+            scenario="Parallel Up +200bps",
+            instrument_id=str(deposit.id),
+            instrument_type="Deposit",
+            base_pv=base_pv,
+            shocked_pv=shocked_pv,
+            duration=None
+        ))
+
+    # Save
+    save_eve_drivers(db, eve_driver_records)
+
+
+    repricing_buckets = []
+
+    for loan in loans:
+        if loan.type == "Fixed Rate Loan" or not loan.next_repricing_date:
+           bucket = "Fixed Rate / Non-Sensitive"
+        else:
+            bucket = get_bucket(loan.next_repricing_date, today, {
+                "0-3 Months": 90,
+            	"3-6 Months": 180,
+            	"6-12 Months": 365,
+            	"1-5 Years": 365 * 5,
+            	">5 Years": 365 * 100,
+            	"Fixed Rate / Non-Sensitive": -1
+            })
+        repricing_buckets.append(RepricingBucketCreate(
+            scenario="Base Case",
+            bucket=bucket,
+            instrument_id=str(loan.id),
+            instrument_type="Loan",
+            notional=loan.notional,
+            position="asset"
+        ))
+    
+    for deposit in deposits:
+        if deposit.type == "Fixed Rate Deposit" or not deposit.next_repricing_date:
+            bucket = "Fixed Rate / Non-Sensitive"
+        else:
+            bucket = get_bucket(deposit.next_repricing_date, today, {
+                "0-3 Months": 90,
+                "3-6 Months": 180,
+                "6-12 Months": 365,
+                "1-5 Years": 365 * 5,
+            	">5 Years": 365 * 100,
+            	"Fixed Rate / Non-Sensitive": -1
+            })
+        repricing_buckets.append(RepricingBucketCreate(
+            scenario="Base Case",
+            bucket=bucket,
+            instrument_id=str(deposit.id),
+            instrument_type="Deposit",
+            notional=deposit.balance,
+            position="liability"
+        ))
+    
+    for derivative in derivatives:
+        if not derivative.next_repricing_date:
+            bucket = "Fixed Rate / Non-Sensitive"
+        else:
+            bucket = get_bucket(derivative.next_repricing_date, today, {
+                "0-3 Months": 90,
+            	"3-6 Months": 180,
+            	"6-12 Months": 365,
+            	"1-5 Years": 365 * 5,
+            	">5 Years": 365 * 100,
+            	"Fixed Rate / Non-Sensitive": -1
+            })
+    	repricing_buckets.append(RepricingBucketCreate(
+            scenario="Base Case",
+            bucket=bucket,
+            instrument_id=str(derivative.id),
+            instrument_type="Derivative",
+            notional=derivative.notional,
+            position="asset" if derivative.pay_receive == "receive" else "liability"
+    	))
+
+    save_repricing_buckets(db, repricing_buckets)    
+    
+    repricing_net_records = []
+    for bucket in gap_analysis_metrics["nii_repricing_gap"]:
+        repricing_net_records.append(RepricingNetPositionCreate(
+            scenario="Base Case",
+            bucket=bucket.bucket,
+            total_assets=bucket.assets,
+            total_liabilities=bucket.liabilities,
+            net_position=bucket.gap,
+            nii_base=base_case_nii,
+            nii_shocked=nii_up_200bps if nii_up_200bps else base_case_nii
+        ))
+
+    save_repricing_net_positions(db, repricing_net_records)
+
+    portfolio_records = []
+
+    for category, amount in loan_composition.items():
+        portfolio_records.append(PortfolioCompositionCreate(
+            timestamp=today,
+            instrument_type="Loan",
+            category=category,
+            subcategory=None,
+            volume_count=len([l for l in loans if l.type == category]),
+            total_amount=amount
+        ))
+
+    for category, amount in deposit_composition.items():
+        portfolio_records.append(PortfolioCompositionCreate(
+            timestamp=today,
+            instrument_type="Deposit",
+            category=category,
+            subcategory=None,
+            volume_count=len([d for d in deposits if d.type == category]),
+            total_amount=amount
+        ))
+
+    for category, amount in derivative_composition.items():
+        portfolio_records.append(PortfolioCompositionCreate(
+            timestamp=today,
+            instrument_type="Derivative",
+            category=category,
+            subcategory=None,
+            volume_count=len([d for d in derivatives if d.type == category]),
+            total_amount=amount
+        ))
+
+    save_portfolio_composition(db, portfolio_records)
+	
 
     return schemas.DashboardData(
         eve_sensitivity=eve_sensitivity,
