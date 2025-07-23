@@ -810,8 +810,78 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     db.query(NiiDriver).filter(NiiDriver.scenario == "Base Case").delete(synchronize_session=False)
     save_nii_drivers(db, nii_driver_records)
 
-    # Always save repricing buckets, net positions, and portfolio composition
+    # Populate repricing_buckets for all instruments
+    repricing_buckets = []
+    nii_buckets_def = {
+        "0-3 Months": 90,
+        "3-6 Months": 180,
+        "6-12 Months": 365,
+        "1-5 Years": 365 * 5,
+        ">5 Years": 365 * 100,
+        "Fixed Rate / Non-Sensitive": -1
+    }
+    # Loans (assets)
+    for loan in loans:
+        if loan.type == "Fixed Rate Loan" or not loan.next_repricing_date:
+            bucket_name = "Fixed Rate / Non-Sensitive"
+        else:
+            bucket_name = get_bucket(loan.next_repricing_date, today, nii_buckets_def)
+        repricing_buckets.append(RepricingBucketCreate(
+            scenario="Base Case",
+            bucket=bucket_name,
+            instrument_id=str(loan.id),
+            instrument_type="Loan",
+            notional=loan.notional,
+            position="asset"
+        ))
+    # Deposits (liabilities)
+    for deposit in deposits:
+        if deposit.type == "CD":
+            if deposit.maturity_date:
+                bucket_name = get_bucket(deposit.maturity_date, today, nii_buckets_def)
+            else:
+                bucket_name = "Fixed Rate / Non-Sensitive"
+        elif deposit.type in ["Checking", "Savings"]:
+            if deposit.next_repricing_date:
+                bucket_name = get_bucket(deposit.next_repricing_date, today, nii_buckets_def)
+            else:
+                bucket_name = "Fixed Rate / Non-Sensitive"
+        else:
+            bucket_name = "Fixed Rate / Non-Sensitive"
+        repricing_buckets.append(RepricingBucketCreate(
+            scenario="Base Case",
+            bucket=bucket_name,
+            instrument_id=str(deposit.id),
+            instrument_type="Deposit",
+            notional=deposit.balance,
+            position="liability"
+        ))
+    # Derivatives
+    for derivative in derivatives:
+        if derivative.type == "Interest Rate Swap":
+            repricing_freq_days = 0
+            if derivative.floating_payment_frequency == "Monthly": repricing_freq_days = 30
+            elif derivative.floating_payment_frequency == "Quarterly": repricing_freq_days = 90
+            elif derivative.floating_payment_frequency == "Semi-Annually": repricing_freq_days = 182
+            elif derivative.floating_payment_frequency == "Annually": repricing_freq_days = 365
+            if repricing_freq_days > 0:
+                next_repricing_date = today + timedelta(days=repricing_freq_days)
+                bucket_name = get_bucket(next_repricing_date, today, nii_buckets_def)
+            else:
+                bucket_name = "Fixed Rate / Non-Sensitive"
+            position = "asset" if getattr(derivative, 'subtype', None) == "Payer Swap" else "liability"
+            repricing_buckets.append(RepricingBucketCreate(
+                scenario="Base Case",
+                bucket=bucket_name,
+                instrument_id=str(derivative.id),
+                instrument_type="Derivative",
+                notional=derivative.notional,
+                position=position
+            ))
+    # Always save repricing buckets
     save_repricing_buckets(db, repricing_buckets)
+
+    # Always save repricing buckets, net positions, and portfolio composition
     repricing_net_records = []
     for bucket in gap_analysis_metrics["nii_repricing_gap"]:
         repricing_net_records.append(RepricingNetPositionCreate(
