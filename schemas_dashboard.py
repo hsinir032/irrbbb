@@ -45,3 +45,11 @@ class PortfolioCompositionCreate(BaseModel):
     subcategory: Optional[str]
     volume_count: int
     total_amount: float
+
+class NiiDriverCreate(BaseModel):
+    scenario: str
+    instrument_id: str
+    instrument_type: str
+    nii_contribution: float
+    breakdown_type: str = None
+    breakdown_value: str = None

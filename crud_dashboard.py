@@ -27,6 +27,11 @@ def save_portfolio_composition(db: Session, records: list[schemas_dashboard.Port
         db.add(models_dashboard.PortfolioComposition(**rec.dict()))
     db.commit()
 
+def save_nii_drivers(db: Session, drivers: list[schemas_dashboard.NiiDriverCreate]):
+    for drv in drivers:
+        db.add(models_dashboard.NiiDriver(**drv.dict()))
+    db.commit()
+
 def get_latest_dashboard_metrics(db: Session):
     return db.query(models_dashboard.DashboardMetric).order_by(models_dashboard.DashboardMetric.timestamp.desc()).all()
 
@@ -50,3 +55,9 @@ def delete_eve_drivers_for_scenario_and_date(db: Session, scenario: str, timesta
         models_dashboard.EveDriver.scenario == scenario
     ).delete(synchronize_session=False)
     db.commit()
+
+def get_nii_drivers_for_scenario_and_breakdown(db: Session, scenario: str, breakdown_type: str):
+    return db.query(models_dashboard.NiiDriver).filter(
+        models_dashboard.NiiDriver.scenario == scenario,
+        models_dashboard.NiiDriver.breakdown_type == breakdown_type
+    ).all()

@@ -181,7 +181,8 @@ from crud_dashboard import (
     get_eve_drivers_for_scenario,
     get_net_positions_for_scenario,
     get_bucket_constituents,
-    get_portfolio_composition
+    get_portfolio_composition,
+    get_nii_drivers_for_scenario_and_breakdown
 )
 
 @app.get("/api/v1/dashboard/snapshot")
@@ -208,6 +209,11 @@ def get_bucket_instruments(scenario: str, bucket: str, db: Session = Depends(get
 def get_portfolio_composition_summary(db: Session = Depends(get_db)):
     """Returns fixed/floating, maturity, and basis distribution."""
     return get_portfolio_composition(db)
+
+@app.get("/api/v1/dashboard/nii-drivers")
+def get_nii_drivers(scenario: str = "Base Case", breakdown: str = "instrument", db: Session = Depends(get_db)):
+    """Fetches NII drivers for a scenario and breakdown (instrument, type, or bucket)."""
+    return get_nii_drivers_for_scenario_and_breakdown(db, scenario, breakdown)
 
 # --- Create missing dashboard tables (only runs once) ---
 try:

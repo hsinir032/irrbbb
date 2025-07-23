@@ -684,58 +684,175 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             duration=None
         ))
 
-    # Save
+    # Save EVE drivers always
     delete_eve_drivers_for_scenario_and_date(db, "Parallel Up +200bps", today)
     save_eve_drivers(db, eve_driver_records)
 
-        save_repricing_buckets(db, repricing_buckets)
-
-        repricing_net_records = []
-        for bucket in gap_analysis_metrics["nii_repricing_gap"]:
-            repricing_net_records.append(RepricingNetPositionCreate(
+    # Save NII drivers (Base Case, per instrument)
+    nii_driver_records = []
+    instrument_nii = []  # For aggregation
+    for loan in loans:
+        loan_cfs = generate_loan_cashflows(loan, BASE_YIELD_CURVE, today, include_principal=False, prepayment_rate=assumptions.prepayment_rate)
+        nii_contribution = sum(cf_amount for cf_date, cf_amount in loan_cfs if today < cf_date <= today + timedelta(days=NII_HORIZON_DAYS))
+        instrument_nii.append({
+            'instrument_id': str(loan.id),
+            'instrument_type': loan.type,
+            'nii_contribution': nii_contribution,
+            'bucket': get_bucket(loan.next_repricing_date if loan.next_repricing_date else loan.maturity_date, today, {
+                "0-3 Months": 90,
+                "3-6 Months": 180,
+                "6-12 Months": 365,
+                "1-5 Years": 365 * 5,
+                ">5 Years": 365 * 100,
+                "Fixed Rate / Non-Sensitive": -1
+            })
+        })
+        nii_driver_records.append(NiiDriverCreate(
+            scenario="Base Case",
+            instrument_id=str(loan.id),
+            instrument_type="Loan",
+            nii_contribution=nii_contribution,
+            breakdown_type="instrument",
+            breakdown_value=str(loan.id)
+        ))
+    for deposit in deposits:
+        deposit_cfs = generate_deposit_cashflows(deposit, BASE_YIELD_CURVE, today, include_principal=False,
+                                                 nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
+                                                 nmd_deposit_beta=assumptions.nmd_deposit_beta)
+        nii_contribution = -sum(abs(cf_amount) for cf_date, cf_amount in deposit_cfs if today < cf_date <= today + timedelta(days=NII_HORIZON_DAYS))
+        instrument_nii.append({
+            'instrument_id': str(deposit.id),
+            'instrument_type': deposit.type,
+            'nii_contribution': nii_contribution,
+            'bucket': get_bucket(deposit.next_repricing_date if deposit.next_repricing_date else deposit.maturity_date, today, {
+                "0-3 Months": 90,
+                "3-6 Months": 180,
+                "6-12 Months": 365,
+                "1-5 Years": 365 * 5,
+                ">5 Years": 365 * 100,
+                "Fixed Rate / Non-Sensitive": -1
+            })
+        })
+        nii_driver_records.append(NiiDriverCreate(
+            scenario="Base Case",
+            instrument_id=str(deposit.id),
+            instrument_type="Deposit",
+            nii_contribution=nii_contribution,
+            breakdown_type="instrument",
+            breakdown_value=str(deposit.id)
+        ))
+    for derivative in derivatives:
+        if derivative.type == "Interest Rate Swap" and derivative.start_date <= today and derivative.end_date > today:
+            fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
+            floating_rate_for_nii = interpolate_rate(BASE_YIELD_CURVE, 365) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
+            if derivative.subtype == "Payer Swap":
+                net_annual_interest = (floating_rate_for_nii - fixed_rate) * derivative.notional
+            elif derivative.subtype == "Receiver Swap":
+                net_annual_interest = (fixed_rate - floating_rate_for_nii) * derivative.notional
+            else:
+                net_annual_interest = 0
+            if (derivative.end_date - today).days > 0:
+                proration_factor = min(1.0, (min(derivative.end_date, today + timedelta(days=NII_HORIZON_DAYS)) - today).days / 365.0)
+                nii_contribution = net_annual_interest * proration_factor
+            else:
+                nii_contribution = 0
+            instrument_nii.append({
+                'instrument_id': str(derivative.id),
+                'instrument_type': derivative.type,
+                'nii_contribution': nii_contribution,
+                'bucket': get_bucket(today, today, {
+                    "0-3 Months": 90,
+                    "3-6 Months": 180,
+                    "6-12 Months": 365,
+                    "1-5 Years": 365 * 5,
+                    ">5 Years": 365 * 100,
+                    "Fixed Rate / Non-Sensitive": -1
+                })
+            })
+            nii_driver_records.append(NiiDriverCreate(
                 scenario="Base Case",
-                bucket=bucket.bucket,
-                total_assets=bucket.assets,
-                total_liabilities=bucket.liabilities,
-                net_position=bucket.gap,
-                nii_base=base_case_nii,
-                nii_shocked=nii_up_200bps if nii_up_200bps else base_case_nii
-            ))
-        save_repricing_net_positions(db, repricing_net_records)
-
-        portfolio_records = []
-
-        for category, amount in loan_composition.items():
-            portfolio_records.append(PortfolioCompositionCreate(
-                timestamp=today,
-                instrument_type="Loan",
-                category=category,
-                subcategory=None,
-                volume_count=len([l for l in loans if l.type == category]),
-                total_amount=amount
-            ))
-
-        for category, amount in deposit_composition.items():
-            portfolio_records.append(PortfolioCompositionCreate(
-                timestamp=today,
-                instrument_type="Deposit",
-                category=category,
-                subcategory=None,
-                volume_count=len([d for d in deposits if d.type == category]),
-                total_amount=amount
-            ))
-
-        for category, amount in derivative_composition.items():
-            portfolio_records.append(PortfolioCompositionCreate(
-                timestamp=today,
+                instrument_id=str(derivative.id),
                 instrument_type="Derivative",
-                category=category,
-                subcategory=None,
-                volume_count=len([d for d in derivatives if d.type == category]),
-                total_amount=amount
+                nii_contribution=nii_contribution,
+                breakdown_type="instrument",
+                breakdown_value=str(derivative.id)
             ))
+    # By type
+    type_sums = {}
+    for entry in instrument_nii:
+        t = entry['instrument_type']
+        type_sums[t] = type_sums.get(t, 0) + entry['nii_contribution']
+    for t, val in type_sums.items():
+        nii_driver_records.append(NiiDriverCreate(
+            scenario="Base Case",
+            instrument_id=None,
+            instrument_type=t,
+            nii_contribution=val,
+            breakdown_type="type",
+            breakdown_value=t
+        ))
+    # By bucket
+    bucket_sums = {}
+    for entry in instrument_nii:
+        b = entry['bucket']
+        bucket_sums[b] = bucket_sums.get(b, 0) + entry['nii_contribution']
+    for b, val in bucket_sums.items():
+        nii_driver_records.append(NiiDriverCreate(
+            scenario="Base Case",
+            instrument_id=None,
+            instrument_type=None,
+            nii_contribution=val,
+            breakdown_type="bucket",
+            breakdown_value=b
+        ))
+    # Delete and save NII drivers for Base Case
+    db.query(NiiDriver).filter(NiiDriver.scenario == "Base Case").delete(synchronize_session=False)
+    save_nii_drivers(db, nii_driver_records)
 
-        save_portfolio_composition(db, portfolio_records)
+    # Always save repricing buckets, net positions, and portfolio composition
+    save_repricing_buckets(db, repricing_buckets)
+    repricing_net_records = []
+    for bucket in gap_analysis_metrics["nii_repricing_gap"]:
+        repricing_net_records.append(RepricingNetPositionCreate(
+            scenario="Base Case",
+            bucket=bucket.bucket,
+            total_assets=bucket.assets,
+            total_liabilities=bucket.liabilities,
+            net_position=bucket.gap,
+            nii_base=base_case_nii,
+            nii_shocked=nii_up_200bps if nii_up_200bps else base_case_nii
+        ))
+    save_repricing_net_positions(db, repricing_net_records)
+
+    portfolio_records = []
+    for category, amount in loan_composition.items():
+        portfolio_records.append(PortfolioCompositionCreate(
+            timestamp=today,
+            instrument_type="Loan",
+            category=category,
+            subcategory=None,
+            volume_count=len([l for l in loans if l.type == category]),
+            total_amount=amount
+        ))
+    for category, amount in deposit_composition.items():
+        portfolio_records.append(PortfolioCompositionCreate(
+            timestamp=today,
+            instrument_type="Deposit",
+            category=category,
+            subcategory=None,
+            volume_count=len([d for d in deposits if d.type == category]),
+            total_amount=amount
+        ))
+    for category, amount in derivative_composition.items():
+        portfolio_records.append(PortfolioCompositionCreate(
+            timestamp=today,
+            instrument_type="Derivative",
+            category=category,
+            subcategory=None,
+            volume_count=len([d for d in derivatives if d.type == category]),
+            total_amount=amount
+        ))
+    save_portfolio_composition(db, portfolio_records)
     
 
     return schemas.DashboardData(

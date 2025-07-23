@@ -55,3 +55,13 @@ class PortfolioComposition(Base):
     subcategory = Column(String)      # optional subtype or basis
     volume_count = Column(Integer)
     total_amount = Column(Float)
+
+class NiiDriver(Base):
+    __tablename__ = "nii_drivers"
+    id = Column(Integer, primary_key=True, index=True)
+    scenario = Column(String)
+    instrument_id = Column(String)
+    instrument_type = Column(String)  # Loan, Deposit, Derivative
+    nii_contribution = Column(Float)
+    breakdown_type = Column(String, nullable=True)  # e.g., instrument, type, bucket
+    breakdown_value = Column(String, nullable=True)  # e.g., instrument id, type name, bucket name
