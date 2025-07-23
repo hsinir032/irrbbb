@@ -685,113 +685,58 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         ))
 
     # Save
-    save_eve_drivers(db, eve_driver_records)
+    if assumptions.manual_refresh:
+        delete_eve_drivers_for_scenario_and_date(db, "Parallel Up +200bps", today)
+        save_eve_drivers(db, eve_driver_records)
 
+        save_repricing_buckets(db, repricing_buckets)
 
-    repricing_buckets = []
+        repricing_net_records = []
+        for bucket in gap_analysis_metrics["nii_repricing_gap"]:
+            repricing_net_records.append(RepricingNetPositionCreate(
+                scenario="Base Case",
+                bucket=bucket.bucket,
+                total_assets=bucket.assets,
+                total_liabilities=bucket.liabilities,
+                net_position=bucket.gap,
+                nii_base=base_case_nii,
+                nii_shocked=nii_up_200bps if nii_up_200bps else base_case_nii
+            ))
+        save_repricing_net_positions(db, repricing_net_records)
 
-    for loan in loans:
-        if loan.type == "Fixed Rate Loan" or not loan.next_repricing_date:
-           bucket = "Fixed Rate / Non-Sensitive"
-        else:
-            bucket = get_bucket(loan.next_repricing_date, today, {
-                "0-3 Months": 90,
-                "3-6 Months": 180,
-                "6-12 Months": 365,
-                "1-5 Years": 365 * 5,
-                ">5 Years": 365 * 100,
-                "Fixed Rate / Non-Sensitive": -1
-            })
-        repricing_buckets.append(RepricingBucketCreate(
-            scenario="Base Case",
-            bucket=bucket,
-            instrument_id=str(loan.id),
-            instrument_type="Loan",
-            notional=loan.notional,
-            position="asset"
-        ))
-    
-    for deposit in deposits:
-        if deposit.type == "Fixed Rate Deposit" or not deposit.next_repricing_date:
-            bucket = "Fixed Rate / Non-Sensitive"
-        else:
-            bucket = get_bucket(deposit.next_repricing_date, today, {
-                "0-3 Months": 90,
-                "3-6 Months": 180,
-                "6-12 Months": 365,
-                "1-5 Years": 365 * 5,
-                ">5 Years": 365 * 100,
-                "Fixed Rate / Non-Sensitive": -1
-            })
-        repricing_buckets.append(RepricingBucketCreate(
-            scenario="Base Case",
-            bucket=bucket,
-            instrument_id=str(deposit.id),
-            instrument_type="Deposit",
-            notional=deposit.balance,
-            position="liability"
-        ))
-    
-    for derivative in derivatives:
-        bucket = "Fixed Rate / Non-Sensitive"
-        repricing_buckets.append(RepricingBucketCreate(
-            scenario="Base Case",
-            bucket=bucket,
-            instrument_id=str(derivative.id),
-            instrument_type="Derivative",
-            notional=derivative.notional,
-            position="asset" if derivative.subtype == "Receiver Swap" else "liability"
-        ))
+        portfolio_records = []
 
-    save_repricing_buckets(db, repricing_buckets)    
-    
-    repricing_net_records = []
-    for bucket in gap_analysis_metrics["nii_repricing_gap"]:
-        repricing_net_records.append(RepricingNetPositionCreate(
-            scenario="Base Case",
-            bucket=bucket.bucket,
-            total_assets=bucket.assets,
-            total_liabilities=bucket.liabilities,
-            net_position=bucket.gap,
-            nii_base=base_case_nii,
-            nii_shocked=nii_up_200bps if nii_up_200bps else base_case_nii
-        ))
+        for category, amount in loan_composition.items():
+            portfolio_records.append(PortfolioCompositionCreate(
+                timestamp=today,
+                instrument_type="Loan",
+                category=category,
+                subcategory=None,
+                volume_count=len([l for l in loans if l.type == category]),
+                total_amount=amount
+            ))
 
-    save_repricing_net_positions(db, repricing_net_records)
+        for category, amount in deposit_composition.items():
+            portfolio_records.append(PortfolioCompositionCreate(
+                timestamp=today,
+                instrument_type="Deposit",
+                category=category,
+                subcategory=None,
+                volume_count=len([d for d in deposits if d.type == category]),
+                total_amount=amount
+            ))
 
-    portfolio_records = []
+        for category, amount in derivative_composition.items():
+            portfolio_records.append(PortfolioCompositionCreate(
+                timestamp=today,
+                instrument_type="Derivative",
+                category=category,
+                subcategory=None,
+                volume_count=len([d for d in derivatives if d.type == category]),
+                total_amount=amount
+            ))
 
-    for category, amount in loan_composition.items():
-        portfolio_records.append(PortfolioCompositionCreate(
-            timestamp=today,
-            instrument_type="Loan",
-            category=category,
-            subcategory=None,
-            volume_count=len([l for l in loans if l.type == category]),
-            total_amount=amount
-        ))
-
-    for category, amount in deposit_composition.items():
-        portfolio_records.append(PortfolioCompositionCreate(
-            timestamp=today,
-            instrument_type="Deposit",
-            category=category,
-            subcategory=None,
-            volume_count=len([d for d in deposits if d.type == category]),
-            total_amount=amount
-        ))
-
-    for category, amount in derivative_composition.items():
-        portfolio_records.append(PortfolioCompositionCreate(
-            timestamp=today,
-            instrument_type="Derivative",
-            category=category,
-            subcategory=None,
-            volume_count=len([d for d in derivatives if d.type == category]),
-            total_amount=amount
-        ))
-
-    save_portfolio_composition(db, portfolio_records)
+        save_portfolio_composition(db, portfolio_records)
     
 
     return schemas.DashboardData(

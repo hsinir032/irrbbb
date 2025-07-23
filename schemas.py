@@ -96,6 +96,7 @@ class NIIScenarioResult(BaseModel):
 
 # Updated Schema for NMD and Prepayment Assumptions
 class CalculationAssumptions(BaseModel):
+    manual_refresh: bool = False
     nmd_effective_maturity_years: int = Field(5, description="Effective maturity in years for Non-Maturity Deposits (NMDs) for EVE calculation.")
     nmd_deposit_beta: float = Field(0.5, description="Deposit beta (0-1) for NMD interest rate sensitivity.")
     prepayment_rate: float = Field(0.0, ge=0.0, le=1.0, description="Annual prepayment rate (CPR) for loans (0-1).")
