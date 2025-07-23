@@ -48,8 +48,8 @@ class PortfolioCompositionCreate(BaseModel):
 
 class NiiDriverCreate(BaseModel):
     scenario: str
-    instrument_id: str
-    instrument_type: str
+    instrument_id: Optional[str] = None
+    instrument_type: Optional[str] = None
     nii_contribution: float
-    breakdown_type: str = None
-    breakdown_value: str = None
+    breakdown_type: Optional[str] = None
+    breakdown_value: Optional[str] = None
