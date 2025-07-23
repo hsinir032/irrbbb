@@ -208,3 +208,10 @@ def get_bucket_instruments(scenario: str, bucket: str, db: Session = Depends(get
 def get_portfolio_composition_summary(db: Session = Depends(get_db)):
     """Returns fixed/floating, maturity, and basis distribution."""
     return get_portfolio_composition(db)
+
+# --- Create missing dashboard tables (only runs once) ---
+try:
+    from models_dashboard import Base as DashboardBase
+    DashboardBase.metadata.create_all(bind=engine)
+except Exception as e:
+    print(f"Error creating dashboard tables: {e}")
