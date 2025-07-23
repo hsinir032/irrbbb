@@ -618,10 +618,10 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     new_scenario_point = {
         "time": now.strftime("%H:%M:%S"),
         "data":{
-		"Base Case": base_case_eve,
-        	"+200bps": next((res.eve_value for res in eve_scenario_results if res.scenario_name == "Parallel Up +200bps"), base_case_eve),
-       		"-200bps": next((res.eve_value for res in eve_scenario_results if res.scenario_name == "Parallel Down -200bps"), base_case_eve),
-		}
+        "Base Case": base_case_eve,
+            "+200bps": next((res.eve_value for res in eve_scenario_results if res.scenario_name == "Parallel Up +200bps"), base_case_eve),
+           "-200bps": next((res.eve_value for res in eve_scenario_results if res.scenario_name == "Parallel Down -200bps"), base_case_eve),
+        }
     }
 
     _scenario_history.append(new_scenario_point)
@@ -696,11 +696,11 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         else:
             bucket = get_bucket(loan.next_repricing_date, today, {
                 "0-3 Months": 90,
-            	"3-6 Months": 180,
-            	"6-12 Months": 365,
-            	"1-5 Years": 365 * 5,
-            	">5 Years": 365 * 100,
-            	"Fixed Rate / Non-Sensitive": -1
+                "3-6 Months": 180,
+                "6-12 Months": 365,
+                "1-5 Years": 365 * 5,
+                ">5 Years": 365 * 100,
+                "Fixed Rate / Non-Sensitive": -1
             })
         repricing_buckets.append(RepricingBucketCreate(
             scenario="Base Case",
@@ -720,8 +720,8 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 "3-6 Months": 180,
                 "6-12 Months": 365,
                 "1-5 Years": 365 * 5,
-            	">5 Years": 365 * 100,
-            	"Fixed Rate / Non-Sensitive": -1
+                ">5 Years": 365 * 100,
+                "Fixed Rate / Non-Sensitive": -1
             })
         repricing_buckets.append(RepricingBucketCreate(
             scenario="Base Case",
@@ -738,20 +738,20 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         else:
             bucket = get_bucket(derivative.next_repricing_date, today, {
                 "0-3 Months": 90,
-            	"3-6 Months": 180,
-            	"6-12 Months": 365,
-            	"1-5 Years": 365 * 5,
-            	">5 Years": 365 * 100,
-            	"Fixed Rate / Non-Sensitive": -1
+                "3-6 Months": 180,
+                "6-12 Months": 365,
+                "1-5 Years": 365 * 5,
+                ">5 Years": 365 * 100,
+                "Fixed Rate / Non-Sensitive": -1
             })
-    	repricing_buckets.append(RepricingBucketCreate(
+        repricing_buckets.append(RepricingBucketCreate(
             scenario="Base Case",
             bucket=bucket,
             instrument_id=str(derivative.id),
             instrument_type="Derivative",
             notional=derivative.notional,
             position="asset" if derivative.pay_receive == "receive" else "liability"
-    	))
+        ))
 
     save_repricing_buckets(db, repricing_buckets)    
     
@@ -802,7 +802,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         ))
 
     save_portfolio_composition(db, portfolio_records)
-	
+    
 
     return schemas.DashboardData(
         eve_sensitivity=eve_sensitivity,
