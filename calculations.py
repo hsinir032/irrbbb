@@ -965,3 +965,31 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         derivative_composition=derivative_composition,
         current_assumptions=assumptions # Pass assumptions back to frontend
     )
+
+
+def calculate_modified_duration(cashflows: List[Tuple[date, float]], yield_curve: Dict[str, float], today: date) -> Optional[float]:
+    """
+    Calculates the modified duration of a series of cash flows using the yield curve.
+    Returns None if PV is zero or cashflows are empty.
+    """
+    if not cashflows:
+        return None
+    pv = 0.0
+    weighted_sum = 0.0
+    for cf_date, cf_amount in cashflows:
+        if cf_date <= today:
+            continue
+        days_to_payment = (cf_date - today).days
+        t = days_to_payment / 365.0  # time in years
+        discount_rate = interpolate_rate(yield_curve, days_to_payment)
+        discount_factor = 1 / (1 + discount_rate * t)
+        pv_cf = cf_amount * discount_factor
+        pv += pv_cf
+        weighted_sum += t * pv_cf
+    if pv == 0.0:
+        return None
+    macaulay_duration = weighted_sum / pv
+    # Use average yield for all cash flows for modified duration denominator
+    avg_yield = sum(interpolate_rate(yield_curve, (cf_date - today).days) for cf_date, _ in cashflows if cf_date > today) / max(1, len([1 for cf_date, _ in cashflows if cf_date > today]))
+    modified_duration = macaulay_duration / (1 + avg_yield)
+    return modified_duration
