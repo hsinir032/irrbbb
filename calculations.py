@@ -649,32 +649,43 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         else:
             curve = shock_yield_curve(BASE_YIELD_CURVE, shock_bps)
         for loan in loans:
-            base_pv = calculate_pv_of_cashflows(
-                generate_loan_cashflows(loan, curve, today, include_principal=True, prepayment_rate=assumptions.prepayment_rate),
-                curve, today
-            )
+            loan_cfs = generate_loan_cashflows(loan, curve, today, include_principal=True, prepayment_rate=assumptions.prepayment_rate)
+            base_pv = calculate_pv_of_cashflows(loan_cfs, curve, today)
+            duration = calculate_modified_duration(loan_cfs, curve, today)
             eve_driver_records.append(EveDriverCreate(
                 scenario=scenario_name,
                 instrument_id=str(loan.id),
                 instrument_type="Loan",
                 base_pv=base_pv,
                 shocked_pv=None,
-                duration=None
+                duration=duration
             ))
         for deposit in deposits:
-            base_pv = calculate_pv_of_cashflows(
-                generate_deposit_cashflows(deposit, curve, today, include_principal=True,
+            deposit_cfs = generate_deposit_cashflows(deposit, curve, today, include_principal=True,
                                            nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
-                                           nmd_deposit_beta=assumptions.nmd_deposit_beta),
-                curve, today
-            )
+                                           nmd_deposit_beta=assumptions.nmd_deposit_beta)
+            base_pv = calculate_pv_of_cashflows(deposit_cfs, curve, today)
+            duration = calculate_modified_duration(deposit_cfs, curve, today)
             eve_driver_records.append(EveDriverCreate(
                 scenario=scenario_name,
                 instrument_id=str(deposit.id),
                 instrument_type="Deposit",
                 base_pv=base_pv,
                 shocked_pv=None,
-                duration=None
+                duration=duration
+            ))
+        for derivative in derivatives:
+            # For derivatives, you may want to use a similar cash flow approach if available
+            # For now, set duration to None or implement if you have cash flow logic
+            base_pv = calculate_derivative_pv(derivative, curve, today)
+            duration = None  # Placeholder, implement if you have derivative cash flows
+            eve_driver_records.append(EveDriverCreate(
+                scenario=scenario_name,
+                instrument_id=str(derivative.id),
+                instrument_type="Derivative",
+                base_pv=base_pv,
+                shocked_pv=None,
+                duration=duration
             ))
     # Delete and save EVE drivers for all scenarios
     db.query(EveDriver).delete(synchronize_session=False)
