@@ -11,7 +11,7 @@ import schemas
 
 from crud_dashboard import *
 from schemas_dashboard import *
-from models_dashboard import NiiDriver, EveDriver, RepricingBucket
+from models_dashboard import NiiDriver, EveDriver, RepricingBucket, RepricingNetPosition, PortfolioComposition
 
 # In-memory store for scenario history (for demonstration)
 _scenario_history: List[Dict[str, Any]] = []
