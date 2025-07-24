@@ -870,9 +870,10 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 position=position
             ))
     # Always save repricing buckets
+    db.query(RepricingBucket).filter(RepricingBucket.scenario == "Base Case").delete(synchronize_session=False)
     save_repricing_buckets(db, repricing_buckets)
 
-    # Always save repricing buckets, net positions, and portfolio composition
+    # Always save repricing net positions
     repricing_net_records = []
     for bucket in gap_analysis_metrics["nii_repricing_gap"]:
         repricing_net_records.append(RepricingNetPositionCreate(
@@ -884,36 +885,50 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             nii_base=base_case_nii,
             nii_shocked=nii_up_200bps if nii_up_200bps else base_case_nii
         ))
+    db.query(RepricingNetPosition).filter(RepricingNetPosition.scenario == "Base Case").delete(synchronize_session=False)
     save_repricing_net_positions(db, repricing_net_records)
 
+    # Always save portfolio composition
     portfolio_records = []
+    # Loans
     for category, amount in loan_composition.items():
+        loans_of_type = [l for l in loans if l.type == category]
+        avg_rate = sum(l.interest_rate for l in loans_of_type if l.interest_rate is not None) / len(loans_of_type) if loans_of_type else None
         portfolio_records.append(PortfolioCompositionCreate(
             timestamp=today,
             instrument_type="Loan",
             category=category,
             subcategory=None,
-            volume_count=len([l for l in loans if l.type == category]),
-            total_amount=amount
+            volume_count=len(loans_of_type),
+            total_amount=amount,
+            average_interest_rate=avg_rate
         ))
+    # Deposits
     for category, amount in deposit_composition.items():
+        deposits_of_type = [d for d in deposits if d.type == category]
+        avg_rate = sum(d.interest_rate for d in deposits_of_type if d.interest_rate is not None) / len(deposits_of_type) if deposits_of_type else None
         portfolio_records.append(PortfolioCompositionCreate(
             timestamp=today,
             instrument_type="Deposit",
             category=category,
             subcategory=None,
-            volume_count=len([d for d in deposits if d.type == category]),
-            total_amount=amount
+            volume_count=len(deposits_of_type),
+            total_amount=amount,
+            average_interest_rate=avg_rate
         ))
+    # Derivatives (no interest rate, so leave as None)
     for category, amount in derivative_composition.items():
+        derivatives_of_type = [d for d in derivatives if d.type == category]
         portfolio_records.append(PortfolioCompositionCreate(
             timestamp=today,
             instrument_type="Derivative",
             category=category,
             subcategory=None,
-            volume_count=len([d for d in derivatives if d.type == category]),
-            total_amount=amount
+            volume_count=len(derivatives_of_type),
+            total_amount=amount,
+            average_interest_rate=None
         ))
+    db.query(PortfolioComposition).filter(PortfolioComposition.instrument_type.in_(["Loan", "Deposit", "Derivative"])).delete(synchronize_session=False)
     save_portfolio_composition(db, portfolio_records)
     
 

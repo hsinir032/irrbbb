@@ -3,7 +3,7 @@ from sqlalchemy import Column, Integer, String, Float, Date
 from sqlalchemy.ext.declarative import declarative_base
 
 # Import Base using absolute path
-from database import Base
+from irrbbb.database import Base
 
 # --- Database Models ---
 class Loan(Base):

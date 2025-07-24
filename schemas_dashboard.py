@@ -45,6 +45,7 @@ class PortfolioCompositionCreate(BaseModel):
     subcategory: Optional[str]
     volume_count: int
     total_amount: float
+    average_interest_rate: Optional[float] = None
 
 class NiiDriverCreate(BaseModel):
     scenario: str

@@ -55,6 +55,7 @@ class PortfolioComposition(Base):
     subcategory = Column(String)      # optional subtype or basis
     volume_count = Column(Integer)
     total_amount = Column(Float)
+    average_interest_rate = Column(Float, nullable=True)
 
 class NiiDriver(Base):
     __tablename__ = "nii_drivers"
