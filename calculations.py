@@ -930,15 +930,49 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     db.query(RepricingNetPosition).filter(RepricingNetPosition.scenario == "Base Case").delete(synchronize_session=False)
     save_repricing_net_positions(db, repricing_net_records)
 
-    # Remove portfolio composition record building and saving from dashboard data
-    # for category, amount in loan_composition.items():
-    #     ...
-    # for category, amount in deposit_composition.items():
-    #     ...
-    # for category, amount in derivative_composition.items():
-    #     ...
-    # db.query(PortfolioComposition).filter(PortfolioComposition.instrument_type.in_(["Loan", "Deposit", "Derivative"])).delete(synchronize_session=False)
-    # save_portfolio_composition(db, portfolio_records)
+    # --- Save Portfolio Composition ---
+    portfolio_records = []
+    # Loans
+    for loan in loans:
+        if loan.type == "Cash":
+            continue
+        portfolio_records.append(PortfolioCompositionCreate(
+            timestamp=today,
+            instrument_type="Loan",
+            category=loan.type,
+            subcategory=getattr(loan, 'subtype', None),
+            volume_count=1,
+            total_amount=loan.notional,
+            average_interest_rate=loan.interest_rate
+        ))
+    # Deposits
+    for deposit in deposits:
+        if deposit.type == "Equity":
+            continue
+        portfolio_records.append(PortfolioCompositionCreate(
+            timestamp=today,
+            instrument_type="Deposit",
+            category=deposit.type,
+            subcategory=None,
+            volume_count=1,
+            total_amount=deposit.balance,
+            average_interest_rate=deposit.interest_rate
+        ))
+    # Derivatives
+    for derivative in derivatives:
+        if getattr(derivative, 'subtype', None) != "Receiver Swap":
+            continue
+        portfolio_records.append(PortfolioCompositionCreate(
+            timestamp=today,
+            instrument_type="Derivative",
+            category=derivative.type,
+            subcategory="Receiver Swap",
+            volume_count=1,
+            total_amount=derivative.notional,
+            average_interest_rate=derivative.fixed_rate
+        ))
+    db.query(PortfolioComposition).filter(PortfolioComposition.instrument_type.in_(["Loan", "Deposit", "Derivative"])).delete(synchronize_session=False)
+    save_portfolio_composition(db, portfolio_records)
     
 
     return schemas.DashboardData(
