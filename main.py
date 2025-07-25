@@ -208,7 +208,13 @@ def get_bucket_instruments(scenario: str, bucket: str, db: Session = Depends(get
 @app.get("/api/v1/portfolio/composition")
 def get_portfolio_composition_summary(db: Session = Depends(get_db)):
     """Returns fixed/floating, maturity, and basis distribution."""
-    return get_portfolio_composition(db)
+    result = get_portfolio_composition(db)
+    return {
+        'records': [r.__dict__ for r in result['records']],
+        'total_loans': result['total_loans'],
+        'total_deposits': result['total_deposits'],
+        'total_derivatives': result['total_derivatives']
+    }
 
 @app.get("/api/v1/dashboard/nii-drivers")
 def get_nii_drivers(scenario: str = "Base Case", breakdown: str = "instrument", db: Session = Depends(get_db)):

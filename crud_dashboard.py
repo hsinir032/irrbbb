@@ -48,7 +48,16 @@ def get_bucket_constituents(db: Session, scenario: str, bucket: str):
     ).all()
 
 def get_portfolio_composition(db: Session):
-    return db.query(models_dashboard.PortfolioComposition).all()
+    records = db.query(models_dashboard.PortfolioComposition).all()
+    total_loans = sum(r.volume_count for r in records if r.instrument_type == 'Loan')
+    total_deposits = sum(r.volume_count for r in records if r.instrument_type == 'Deposit')
+    total_derivatives = sum(r.volume_count for r in records if r.instrument_type == 'Derivative')
+    return {
+        'records': records,
+        'total_loans': total_loans,
+        'total_deposits': total_deposits,
+        'total_derivatives': total_derivatives
+    }
 
 def delete_eve_drivers_for_scenario_and_date(db: Session, scenario: str, timestamp: date):
     db.query(models_dashboard.EveDriver).filter(
