@@ -204,32 +204,26 @@ def generate_deposit_cashflows(deposit: models.Deposit, yield_curve: Dict[str, f
     cashflows = []
     current_balance = deposit.balance
     
-    # Handle CDs (Certificate of Deposits)
-    if deposit.type == "CD":
+    # Handle CDs (Certificate of Deposits) and Wholesale Funding
+    if deposit.type in ["CD", "Wholesale Funding"]:
         if not deposit.maturity_date or deposit.maturity_date <= today:
-            return [] # Matured CD
-
+            return [] # Matured or missing maturity
         payment_periods_per_year = get_periods_per_year(deposit.payment_frequency)
-        if payment_periods_per_year == 0: # Should not happen for CD with payment frequency
-            interval_days = (deposit.maturity_date - deposit.open_date).days # Assume interest paid at maturity
+        if payment_periods_per_year == 0:
+            interval_days = (deposit.maturity_date - deposit.open_date).days
         else:
             interval_days = 365 / payment_periods_per_year
-
         next_payment_date = deposit.open_date
         while next_payment_date <= today:
             next_payment_date += timedelta(days=interval_days)
-
         if next_payment_date <= today:
             next_payment_date = today + timedelta(days=interval_days)
-
         while next_payment_date <= deposit.maturity_date:
             interest_expense = current_balance * deposit.interest_rate * (interval_days / 365.0)
-            cashflows.append((next_payment_date, -interest_expense)) # Negative for expense
+            cashflows.append((next_payment_date, -interest_expense))
             next_payment_date += timedelta(days=interval_days)
-
         if include_principal:
-            cashflows.append((deposit.maturity_date, -current_balance)) # Principal outflow at maturity
-        
+            cashflows.append((deposit.maturity_date, -current_balance))
         return cashflows
 
     # Handle Non-Maturity Deposits (Checking/Savings)
@@ -344,12 +338,17 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
     total_nii_expense = 0.0
 
     for loan in loans:
+        if loan.type == "Cash":
+            continue
+        # HTM Securities are treated as fixed rate, fixed maturity assets (no special handling needed)
         loan_cfs = generate_loan_cashflows(loan, yield_curve, today, include_principal=False, prepayment_rate=prepayment_rate)
         for cf_date, cf_amount in loan_cfs:
             if today < cf_date <= nii_horizon_date:
                 total_nii_income += cf_amount
 
     for deposit in deposits:
+        if deposit.type == "Equity":
+            continue
         deposit_cfs = generate_deposit_cashflows(deposit, yield_curve, today, include_principal=False,
                                                  nmd_effective_maturity_years=nmd_effective_maturity_years,
                                                  nmd_deposit_beta=nmd_deposit_beta)
@@ -381,10 +380,15 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
     total_pv_derivatives = 0.0
 
     for loan in loans:
+        if loan.type == "Cash":
+            continue
+        # HTM Securities are treated as fixed rate, fixed maturity assets (no special handling needed)
         loan_cfs = generate_loan_cashflows(loan, yield_curve, today, include_principal=True, prepayment_rate=prepayment_rate)
         total_pv_assets += calculate_pv_of_cashflows(loan_cfs, yield_curve, today)
 
     for deposit in deposits:
+        if deposit.type == "Equity":
+            continue
         deposit_cfs = generate_deposit_cashflows(deposit, yield_curve, today, include_principal=True,
                                                  nmd_effective_maturity_years=nmd_effective_maturity_years,
                                                  nmd_deposit_beta=nmd_deposit_beta)
@@ -433,14 +437,20 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
     }
 
     for loan in loans:
-        if loan.type == "Fixed Rate Loan" or not loan.next_repricing_date:
+        if loan.type == "Cash":
+            continue
+        if loan.type == "HTM Securities":
+            bucket_name = "Fixed Rate / Non-Sensitive"
+        elif not loan.next_repricing_date:
             bucket_name = "Fixed Rate / Non-Sensitive"
         else:
             bucket_name = get_bucket(loan.next_repricing_date, today, nii_buckets_def)
         nii_gap_data[bucket_name]["assets"] += loan.notional
 
     for deposit in deposits:
-        if deposit.type == "CD":
+        if deposit.type == "Equity":
+            continue
+        if deposit.type in ["CD", "Wholesale Funding"]:
             if deposit.maturity_date:
                 bucket_name = get_bucket(deposit.maturity_date, today, nii_buckets_def)
             else:
@@ -497,11 +507,15 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
     }
 
     for loan in loans:
+        if loan.type == "Cash":
+            continue
         bucket_name = get_bucket(loan.maturity_date, today, eve_buckets_def)
         eve_gap_data[bucket_name]["assets"] += loan.notional
 
     for deposit in deposits:
-        if deposit.type == "CD" and deposit.maturity_date:
+        if deposit.type == "Equity":
+            continue
+        if deposit.type in ["CD", "Wholesale Funding"] and deposit.maturity_date:
             bucket_name = get_bucket(deposit.maturity_date, today, eve_buckets_def)
         else:
             bucket_name = "Non-Maturity"
@@ -649,6 +663,9 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         else:
             curve = shock_yield_curve(BASE_YIELD_CURVE, shock_bps)
         for loan in loans:
+            if loan.type == "Cash":
+                continue
+            # HTM Securities are treated as fixed rate, fixed maturity assets (no special handling needed)
             loan_cfs = generate_loan_cashflows(loan, curve, today, include_principal=True, prepayment_rate=assumptions.prepayment_rate)
             base_pv = calculate_pv_of_cashflows(loan_cfs, curve, today)
             duration = calculate_modified_duration(loan_cfs, curve, today)
@@ -661,6 +678,8 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 duration=duration
             ))
         for deposit in deposits:
+            if deposit.type == "Equity":
+                continue
             deposit_cfs = generate_deposit_cashflows(deposit, curve, today, include_principal=True,
                                            nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
                                            nmd_deposit_beta=assumptions.nmd_deposit_beta)
@@ -675,6 +694,8 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 duration=duration
             ))
         for derivative in derivatives:
+            if derivative.subtype != "Receiver Swap":
+                continue
             # For derivatives, you may want to use a similar cash flow approach if available
             # For now, set duration to None or implement if you have cash flow logic
             base_pv = calculate_derivative_pv(derivative, curve, today)
@@ -695,6 +716,8 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     nii_driver_records = []
     instrument_nii = []  # For aggregation
     for loan in loans:
+        if loan.type == "Cash":
+            continue
         loan_cfs = generate_loan_cashflows(loan, BASE_YIELD_CURVE, today, include_principal=False, prepayment_rate=assumptions.prepayment_rate)
         nii_contribution = sum(cf_amount for cf_date, cf_amount in loan_cfs if today < cf_date <= today + timedelta(days=NII_HORIZON_DAYS))
         instrument_nii.append({
@@ -719,6 +742,8 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             breakdown_value=str(loan.id)
         ))
     for deposit in deposits:
+        if deposit.type == "Equity":
+            continue
         deposit_cfs = generate_deposit_cashflows(deposit, BASE_YIELD_CURVE, today, include_principal=False,
                                                  nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
                                                  nmd_deposit_beta=assumptions.nmd_deposit_beta)
@@ -824,7 +849,11 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     }
     # Loans (assets)
     for loan in loans:
-        if loan.type == "Fixed Rate Loan" or not loan.next_repricing_date:
+        if loan.type == "Cash":
+            continue
+        if loan.type == "HTM Securities":
+            bucket_name = "Fixed Rate / Non-Sensitive"
+        elif not loan.next_repricing_date:
             bucket_name = "Fixed Rate / Non-Sensitive"
         else:
             bucket_name = get_bucket(loan.next_repricing_date, today, nii_buckets_def)
@@ -838,7 +867,9 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         ))
     # Deposits (liabilities)
     for deposit in deposits:
-        if deposit.type == "CD":
+        if deposit.type == "Equity":
+            continue
+        if deposit.type in ["CD", "Wholesale Funding"]:
             if deposit.maturity_date:
                 bucket_name = get_bucket(deposit.maturity_date, today, nii_buckets_def)
             else:
