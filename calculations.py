@@ -899,48 +899,15 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     db.query(RepricingNetPosition).filter(RepricingNetPosition.scenario == "Base Case").delete(synchronize_session=False)
     save_repricing_net_positions(db, repricing_net_records)
 
-    # Always save portfolio composition
-    portfolio_records = []
-    # Loans
-    for category, amount in loan_composition.items():
-        loans_of_type = [l for l in loans if l.type == category]
-        avg_rate = sum(l.interest_rate for l in loans_of_type if l.interest_rate is not None) / len(loans_of_type) if loans_of_type else None
-        portfolio_records.append(PortfolioCompositionCreate(
-            timestamp=today,
-            instrument_type="Loan",
-            category=category,
-            subcategory=None,
-            volume_count=len(loans_of_type),
-            total_amount=amount,
-            average_interest_rate=avg_rate
-        ))
-    # Deposits
-    for category, amount in deposit_composition.items():
-        deposits_of_type = [d for d in deposits if d.type == category]
-        avg_rate = sum(d.interest_rate for d in deposits_of_type if d.interest_rate is not None) / len(deposits_of_type) if deposits_of_type else None
-        portfolio_records.append(PortfolioCompositionCreate(
-            timestamp=today,
-            instrument_type="Deposit",
-            category=category,
-            subcategory=None,
-            volume_count=len(deposits_of_type),
-            total_amount=amount,
-            average_interest_rate=avg_rate
-        ))
-    # Derivatives (no interest rate, so leave as None)
-    for category, amount in derivative_composition.items():
-        derivatives_of_type = [d for d in derivatives if d.type == category]
-        portfolio_records.append(PortfolioCompositionCreate(
-            timestamp=today,
-            instrument_type="Derivative",
-            category=category,
-            subcategory=None,
-            volume_count=len(derivatives_of_type),
-            total_amount=amount,
-            average_interest_rate=None
-        ))
-    db.query(PortfolioComposition).filter(PortfolioComposition.instrument_type.in_(["Loan", "Deposit", "Derivative"])).delete(synchronize_session=False)
-    save_portfolio_composition(db, portfolio_records)
+    # Remove portfolio composition record building and saving from dashboard data
+    # for category, amount in loan_composition.items():
+    #     ...
+    # for category, amount in deposit_composition.items():
+    #     ...
+    # for category, amount in derivative_composition.items():
+    #     ...
+    # db.query(PortfolioComposition).filter(PortfolioComposition.instrument_type.in_(["Loan", "Deposit", "Derivative"])).delete(synchronize_session=False)
+    # save_portfolio_composition(db, portfolio_records)
     
 
     return schemas.DashboardData(
@@ -949,9 +916,6 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         portfolio_value=portfolio_value_base,
         yield_curve_data=yield_curve_data_for_display,
         scenario_data=_scenario_history,
-        total_loans=len(loans),
-        total_deposits=len(deposits),
-        total_derivatives=len(derivatives),
         total_assets_value=total_assets_value_base,
         total_liabilities_value=total_liabilities_value_base,
         net_interest_income=base_case_nii,
@@ -960,9 +924,6 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         eve_maturity_gap=gap_analysis_metrics["eve_maturity_gap"],
         eve_scenarios=eve_scenario_results,
         nii_scenarios=nii_scenario_results,
-        loan_composition=loan_composition,
-        deposit_composition=deposit_composition,
-        derivative_composition=derivative_composition,
         current_assumptions=assumptions # Pass assumptions back to frontend
     )
 
