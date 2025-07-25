@@ -541,17 +541,17 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     derivatives = db.query(models.Derivative).all()
 
     # --- Calculate Portfolio Composition ---
-    loan_composition: Dict[str, float] = {}
-    for loan in loans:
-        loan_composition[loan.type] = loan_composition.get(loan.type, 0.0) + loan.notional
+    # loan_composition: Dict[str, float] = {}
+    # for loan in loans:
+    #     loan_composition[loan.type] = loan_composition.get(loan.type, 0.0) + loan.notional
 
-    deposit_composition: Dict[str, float] = {}
-    for deposit in deposits:
-        deposit_composition[deposit.type] = deposit_composition.get(deposit.type, 0.0) + deposit.balance
+    # deposit_composition: Dict[str, float] = {}
+    # for deposit in deposits:
+    #     deposit_composition[deposit.type] = deposit_composition.get(deposit.type, 0.0) + deposit.balance
     
-    derivative_composition: Dict[str, float] = {}
-    for derivative in derivatives:
-        derivative_composition[derivative.type] = derivative_composition.get(derivative.type, 0.0) + derivative.notional
+    # derivative_composition: Dict[str, float] = {}
+    # for derivative in derivatives:
+    #     derivative_composition[derivative.type] = derivative_composition.get(derivative.type, 0.0) + derivative.notional
 
 
     # --- Calculate EVE and NII for all Scenarios ---
