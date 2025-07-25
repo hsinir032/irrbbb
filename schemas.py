@@ -108,9 +108,6 @@ class DashboardData(BaseModel):
     portfolio_value: float
     yield_curve_data: List[YieldCurvePoint]
     scenario_data: List[ScenarioDataPoint]
-    total_loans: int
-    total_deposits: int
-    total_derivatives: int
     total_assets_value: float
     total_liabilities_value: float
     net_interest_income: float
@@ -119,9 +116,5 @@ class DashboardData(BaseModel):
     eve_maturity_gap: List[GapBucket]
     eve_scenarios: List[EVEScenarioResult]
     nii_scenarios: List[NIIScenarioResult]
-    loan_composition: Dict[str, float]
-    deposit_composition: Dict[str, float]
-    derivative_composition: Dict[str, float]
-    # Include the current assumptions in the response for the frontend to display
     current_assumptions: CalculationAssumptions
 
