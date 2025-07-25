@@ -66,6 +66,10 @@ def delete_eve_drivers_for_scenario_and_date(db: Session, scenario: str, timesta
     db.commit()
 
 def get_nii_drivers_for_scenario_and_breakdown(db: Session, scenario: str, breakdown_type: str):
+    if breakdown_type is None or breakdown_type.lower() == 'all':
+        return db.query(models_dashboard.NiiDriver).filter(
+            models_dashboard.NiiDriver.scenario == scenario
+        ).all()
     return db.query(models_dashboard.NiiDriver).filter(
         models_dashboard.NiiDriver.scenario == scenario,
         models_dashboard.NiiDriver.breakdown_type == breakdown_type
