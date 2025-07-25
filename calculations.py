@@ -672,7 +672,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             eve_driver_records.append(EveDriverCreate(
                 scenario=scenario_name,
                 instrument_id=str(loan.id),
-                instrument_type="Loan",
+                instrument_type=loan.type,
                 base_pv=base_pv,
                 shocked_pv=None,
                 duration=duration
@@ -688,7 +688,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             eve_driver_records.append(EveDriverCreate(
                 scenario=scenario_name,
                 instrument_id=str(deposit.id),
-                instrument_type="Deposit",
+                instrument_type=deposit.type,
                 base_pv=base_pv,
                 shocked_pv=None,
                 duration=duration
@@ -703,7 +703,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             eve_driver_records.append(EveDriverCreate(
                 scenario=scenario_name,
                 instrument_id=str(derivative.id),
-                instrument_type="Derivative",
+                instrument_type=derivative.type,
                 base_pv=base_pv,
                 shocked_pv=None,
                 duration=duration
@@ -715,96 +715,6 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     # Save NII drivers (Base Case, per instrument)
     nii_driver_records = []
     instrument_nii = []  # For aggregation
-    for loan in loans:
-        if loan.type == "Cash":
-            continue
-        loan_cfs = generate_loan_cashflows(loan, BASE_YIELD_CURVE, today, include_principal=False, prepayment_rate=assumptions.prepayment_rate)
-        nii_contribution = sum(cf_amount for cf_date, cf_amount in loan_cfs if today < cf_date <= today + timedelta(days=NII_HORIZON_DAYS))
-        instrument_nii.append({
-            'instrument_id': str(loan.id),
-            'instrument_type': loan.type,
-            'nii_contribution': nii_contribution,
-            'bucket': get_bucket(loan.next_repricing_date if loan.next_repricing_date else loan.maturity_date, today, {
-                "0-3 Months": 90,
-                "3-6 Months": 180,
-                "6-12 Months": 365,
-                "1-5 Years": 365 * 5,
-                ">5 Years": 365 * 100,
-                "Fixed Rate / Non-Sensitive": -1
-            })
-        })
-        nii_driver_records.append(NiiDriverCreate(
-            scenario="Base Case",
-            instrument_id=str(loan.id),
-            instrument_type="Loan",
-            nii_contribution=nii_contribution,
-            breakdown_type="instrument",
-            breakdown_value=str(loan.id)
-        ))
-    for deposit in deposits:
-        if deposit.type == "Equity":
-            continue
-        deposit_cfs = generate_deposit_cashflows(deposit, BASE_YIELD_CURVE, today, include_principal=False,
-                                                 nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
-                                                 nmd_deposit_beta=assumptions.nmd_deposit_beta)
-        nii_contribution = -sum(abs(cf_amount) for cf_date, cf_amount in deposit_cfs if today < cf_date <= today + timedelta(days=NII_HORIZON_DAYS))
-        instrument_nii.append({
-            'instrument_id': str(deposit.id),
-            'instrument_type': deposit.type,
-            'nii_contribution': nii_contribution,
-            'bucket': get_bucket(deposit.next_repricing_date if deposit.next_repricing_date else deposit.maturity_date, today, {
-                "0-3 Months": 90,
-                "3-6 Months": 180,
-                "6-12 Months": 365,
-                "1-5 Years": 365 * 5,
-                ">5 Years": 365 * 100,
-                "Fixed Rate / Non-Sensitive": -1
-            })
-        })
-        nii_driver_records.append(NiiDriverCreate(
-            scenario="Base Case",
-            instrument_id=str(deposit.id),
-            instrument_type="Deposit",
-            nii_contribution=nii_contribution,
-            breakdown_type="instrument",
-            breakdown_value=str(deposit.id)
-        ))
-    for derivative in derivatives:
-        if derivative.type == "Interest Rate Swap" and derivative.start_date <= today and derivative.end_date > today:
-            fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
-            floating_rate_for_nii = interpolate_rate(BASE_YIELD_CURVE, 365) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
-            if derivative.subtype == "Payer Swap":
-                net_annual_interest = (floating_rate_for_nii - fixed_rate) * derivative.notional
-            elif derivative.subtype == "Receiver Swap":
-                net_annual_interest = (fixed_rate - floating_rate_for_nii) * derivative.notional
-            else:
-                net_annual_interest = 0
-            if (derivative.end_date - today).days > 0:
-                proration_factor = min(1.0, (min(derivative.end_date, today + timedelta(days=NII_HORIZON_DAYS)) - today).days / 365.0)
-                nii_contribution = net_annual_interest * proration_factor
-            else:
-                nii_contribution = 0
-            instrument_nii.append({
-                'instrument_id': str(derivative.id),
-                'instrument_type': derivative.type,
-                'nii_contribution': nii_contribution,
-                'bucket': get_bucket(today, today, {
-                    "0-3 Months": 90,
-                    "3-6 Months": 180,
-                    "6-12 Months": 365,
-                    "1-5 Years": 365 * 5,
-                    ">5 Years": 365 * 100,
-                    "Fixed Rate / Non-Sensitive": -1
-                })
-            })
-            nii_driver_records.append(NiiDriverCreate(
-                scenario="Base Case",
-                instrument_id=str(derivative.id),
-                instrument_type="Derivative",
-                nii_contribution=nii_contribution,
-                breakdown_type="instrument",
-                breakdown_value=str(derivative.id)
-            ))
     # By type
     type_sums = {}
     for entry in instrument_nii:
