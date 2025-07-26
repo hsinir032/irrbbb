@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 import models_dashboard, schemas_dashboard
-from datetime import date
+from datetime import date, datetime
+from typing import List, Dict, Optional
 
 def save_dashboard_metric(db: Session, metric: schemas_dashboard.DashboardMetricCreate):
     record = models_dashboard.DashboardMetric(**metric.dict())
@@ -30,6 +31,24 @@ def save_portfolio_composition(db: Session, records: list[schemas_dashboard.Port
 def save_nii_drivers(db: Session, drivers: list[schemas_dashboard.NiiDriverCreate]):
     for drv in drivers:
         db.add(models_dashboard.NiiDriver(**drv.dict()))
+    db.commit()
+
+def save_yield_curves(db: Session, yield_curves: List[schemas_dashboard.YieldCurveCreate]):
+    """Save multiple yield curve records to the database."""
+    for curve in yield_curves:
+        db.add(models_dashboard.YieldCurve(**curve.dict()))
+    db.commit()
+
+def get_yield_curves(db: Session, scenario: Optional[str] = None) -> List[models_dashboard.YieldCurve]:
+    """Get yield curves from database, optionally filtered by scenario."""
+    query = db.query(models_dashboard.YieldCurve)
+    if scenario:
+        query = query.filter(models_dashboard.YieldCurve.scenario == scenario)
+    return query.all()
+
+def delete_yield_curves(db: Session):
+    """Delete all yield curves from the database."""
+    db.query(models_dashboard.YieldCurve).delete(synchronize_session=False)
     db.commit()
 
 def get_latest_dashboard_metrics(db: Session):

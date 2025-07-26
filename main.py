@@ -182,7 +182,8 @@ from crud_dashboard import (
     get_net_positions_for_scenario,
     get_bucket_constituents,
     get_portfolio_composition,
-    get_nii_drivers_for_scenario_and_breakdown
+    get_nii_drivers_for_scenario_and_breakdown,
+    get_yield_curves
 )
 
 @app.get("/api/v1/dashboard/snapshot")
@@ -220,6 +221,12 @@ def get_portfolio_composition_summary(db: Session = Depends(get_db)):
 def get_nii_drivers(scenario: str = "Base Case", breakdown: str = "instrument", db: Session = Depends(get_db)):
     """Fetches NII drivers for a scenario and breakdown (instrument, type, or bucket)."""
     return get_nii_drivers_for_scenario_and_breakdown(db, scenario, breakdown)
+
+@app.get("/api/v1/yield-curves")
+def get_yield_curves_endpoint(scenario: Optional[str] = None, db: Session = Depends(get_db)):
+    """Fetches yield curves from database, optionally filtered by scenario."""
+    curves = get_yield_curves(db, scenario)
+    return [schemas_dashboard.YieldCurveResponse.from_orm(curve) for curve in curves]
 
 # --- Create missing dashboard tables (only runs once) ---
 try:

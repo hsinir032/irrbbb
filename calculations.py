@@ -11,7 +11,7 @@ import schemas
 
 from crud_dashboard import *
 from schemas_dashboard import *
-from models_dashboard import NiiDriver, EveDriver, RepricingBucket, RepricingNetPosition, PortfolioComposition
+from models_dashboard import NiiDriver, EveDriver, RepricingBucket, RepricingNetPosition, PortfolioComposition, YieldCurve
 
 # In-memory store for scenario history (for demonstration)
 _scenario_history: List[Dict[str, Any]] = []
@@ -554,20 +554,6 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     deposits = db.query(models.Deposit).all()
     derivatives = db.query(models.Derivative).all()
 
-    # --- Calculate Portfolio Composition ---
-    # loan_composition: Dict[str, float] = {}
-    # for loan in loans:
-    #     loan_composition[loan.type] = loan_composition.get(loan.type, 0.0) + loan.notional
-
-    # deposit_composition: Dict[str, float] = {}
-    # for deposit in deposits:
-    #     deposit_composition[deposit.type] = deposit_composition.get(deposit.type, 0.0) + deposit.balance
-    
-    # derivative_composition: Dict[str, float] = {}
-    # for derivative in derivatives:
-    #     derivative_composition[derivative.type] = derivative_composition.get(derivative.type, 0.0) + derivative.notional
-
-
     # --- Calculate EVE and NII for all Scenarios ---
     eve_scenario_results: List[schemas.EVEScenarioResult] = []
     nii_scenario_results: List[schemas.NIIScenarioResult] = []
@@ -578,12 +564,28 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     total_liabilities_value_base = 0.0
     portfolio_value_base = 0.0
 
+    # --- Save Yield Curves to Database ---
+    yield_curve_records = []
+    now = datetime.now()
+
     for scenario_name, shock_bps in INTEREST_RATE_SCENARIOS.items():
-        shocked_curve = shock_yield_curve(BASE_YIELD_CURVE, shock_bps)
+        if scenario_name == "Base Case":
+            curve = BASE_YIELD_CURVE
+        else:
+            curve = shock_yield_curve(BASE_YIELD_CURVE, shock_bps)
+        
+        # Save yield curve data for this scenario
+        for tenor, rate in curve.items():
+            yield_curve_records.append(schemas_dashboard.YieldCurveCreate(
+                scenario=scenario_name,
+                tenor=tenor,
+                rate=rate,
+                timestamp=now
+            ))
         
         # Pass all assumptions to the calculation function
         metrics_for_curve = calculate_nii_and_eve_for_curve(
-            db, shocked_curve,
+            db, curve,
             nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
             nmd_deposit_beta=assumptions.nmd_deposit_beta,
             prepayment_rate=assumptions.prepayment_rate
@@ -605,6 +607,10 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             total_liabilities_value_base = metrics_for_curve["total_liabilities_value"]
             portfolio_value_base = total_assets_value_base + total_liabilities_value_base + metrics_for_curve["total_derivatives_value"]
 
+    # Delete and save yield curves
+    from crud_dashboard import delete_yield_curves, save_yield_curves
+    delete_yield_curves(db)
+    save_yield_curves(db, yield_curve_records)
 
     # --- Calculate Sensitivities ---
     eve_sensitivity = 0.0
@@ -621,7 +627,6 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         nii_sensitivity = ((nii_up_200bps - base_case_nii) / base_case_nii) * 100
         nii_sensitivity = round(nii_sensitivity, 2)
 
-
     # --- Gap Analysis Metrics (unchanged, still uses current state) ---
     gap_analysis_metrics = calculate_gap_analysis(db)
 
@@ -629,7 +634,6 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     yield_curve_data_for_display = [schemas.YieldCurvePoint(name=tenor, rate=rate*100) for tenor, rate in BASE_YIELD_CURVE.items()]
 
     # --- Historical Scenario Data (for the EVE chart over time) ---
-    now = datetime.now()
     new_scenario_point = {
         "time": now.strftime("%H:%M:%S"),
         "data":{
@@ -681,8 +685,8 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             if deposit.type == "Equity":
                 continue
             deposit_cfs = generate_deposit_cashflows(deposit, curve, today, include_principal=True,
-                                           nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
-                                           nmd_deposit_beta=assumptions.nmd_deposit_beta)
+                                                 nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
+                                                 nmd_deposit_beta=assumptions.nmd_deposit_beta)
             base_pv = calculate_pv_of_cashflows(deposit_cfs, curve, today)
             duration = calculate_modified_duration(deposit_cfs, curve, today)
             eve_driver_records.append(EveDriverCreate(
@@ -780,82 +784,80 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             continue
         if loan.type == "HTM Securities":
             bucket_name = "Fixed Rate / Non-Sensitive"
-        elif not loan.next_repricing_date:
-            bucket_name = "Fixed Rate / Non-Sensitive"
         else:
             bucket_name = get_bucket(loan.next_repricing_date, today, nii_buckets_def)
         repricing_buckets.append(RepricingBucketCreate(
             scenario="Base Case",
             bucket=bucket_name,
-            instrument_id=str(loan.id),
             instrument_type="Loan",
-            notional=loan.notional,
-            position="asset"
+            instrument_id=str(loan.id),
+            amount=loan.notional
         ))
     # Deposits (liabilities)
     for deposit in deposits:
         if deposit.type == "Equity":
             continue
-        if deposit.type in ["CD", "Wholesale Funding"]:
-            if deposit.maturity_date:
-                bucket_name = get_bucket(deposit.maturity_date, today, nii_buckets_def)
-            else:
-                bucket_name = "Fixed Rate / Non-Sensitive"
-        elif deposit.type in ["Checking", "Savings"]:
-            if deposit.next_repricing_date:
-                bucket_name = get_bucket(deposit.next_repricing_date, today, nii_buckets_def)
-            else:
-                bucket_name = "Fixed Rate / Non-Sensitive"
+        if deposit.type == "Wholesale Funding":
+            bucket_name = get_bucket(deposit.maturity_date, today, nii_buckets_def)
         else:
-            bucket_name = "Fixed Rate / Non-Sensitive"
+            bucket_name = get_bucket(deposit.next_repricing_date, today, nii_buckets_def)
         repricing_buckets.append(RepricingBucketCreate(
             scenario="Base Case",
             bucket=bucket_name,
-            instrument_id=str(deposit.id),
             instrument_type="Deposit",
-            notional=deposit.balance,
-            position="liability"
+            instrument_id=str(deposit.id),
+            amount=deposit.balance
         ))
     # Derivatives
     for derivative in derivatives:
-        if derivative.type == "Interest Rate Swap":
-            repricing_freq_days = 0
-            if derivative.floating_payment_frequency == "Monthly": repricing_freq_days = 30
-            elif derivative.floating_payment_frequency == "Quarterly": repricing_freq_days = 90
-            elif derivative.floating_payment_frequency == "Semi-Annually": repricing_freq_days = 182
-            elif derivative.floating_payment_frequency == "Annually": repricing_freq_days = 365
-            if repricing_freq_days > 0:
-                next_repricing_date = today + timedelta(days=repricing_freq_days)
-                bucket_name = get_bucket(next_repricing_date, today, nii_buckets_def)
-            else:
-                bucket_name = "Fixed Rate / Non-Sensitive"
-            position = "asset" if getattr(derivative, 'subtype', None) == "Payer Swap" else "liability"
+        if getattr(derivative, 'subtype', None) != "Receiver Swap":
+            continue
+        if derivative.end_date and derivative.end_date > today:
+            next_repricing_date = derivative.end_date
+        else:
+            next_repricing_date = derivative.start_date + timedelta(days=365)  # Default to 1 year
+        bucket_name = get_bucket(next_repricing_date, today, nii_buckets_def)
+        if derivative.subtype == "Payer Swap":
             repricing_buckets.append(RepricingBucketCreate(
                 scenario="Base Case",
                 bucket=bucket_name,
-                instrument_id=str(derivative.id),
                 instrument_type="Derivative",
-                notional=derivative.notional,
-                position=position
+                instrument_id=str(derivative.id),
+                amount=derivative.notional
             ))
-    # Always save repricing buckets
+        elif derivative.subtype == "Receiver Swap":
+            repricing_buckets.append(RepricingBucketCreate(
+                scenario="Base Case",
+                bucket=bucket_name,
+                instrument_type="Derivative",
+                instrument_id=str(derivative.id),
+                amount=derivative.notional
+            ))
+        else:
+            repricing_buckets.append(RepricingBucketCreate(
+                scenario="Base Case",
+                bucket="Fixed Rate / Non-Sensitive",
+                instrument_type="Derivative",
+                instrument_id=str(derivative.id),
+                amount=derivative.notional
+            ))
+    # Delete and save repricing buckets
     db.query(RepricingBucket).filter(RepricingBucket.scenario == "Base Case").delete(synchronize_session=False)
     save_repricing_buckets(db, repricing_buckets)
 
-    # Always save repricing net positions
-    repricing_net_records = []
+    # Populate repricing_net_positions
+    net_positions = []
     for bucket in gap_analysis_metrics["nii_repricing_gap"]:
-        repricing_net_records.append(RepricingNetPositionCreate(
+        net_positions.append(RepricingNetPositionCreate(
             scenario="Base Case",
             bucket=bucket.bucket,
-            total_assets=bucket.assets,
-            total_liabilities=bucket.liabilities,
-            net_position=bucket.gap,
-            nii_base=base_case_nii,
-            nii_shocked=nii_up_200bps if nii_up_200bps else base_case_nii
+            assets=bucket.assets,
+            liabilities=bucket.liabilities,
+            net_position=bucket.gap
         ))
+    # Delete and save net positions
     db.query(RepricingNetPosition).filter(RepricingNetPosition.scenario == "Base Case").delete(synchronize_session=False)
-    save_repricing_net_positions(db, repricing_net_records)
+    save_repricing_net_positions(db, net_positions)
 
     # --- Save Portfolio Composition ---
     portfolio_records = []

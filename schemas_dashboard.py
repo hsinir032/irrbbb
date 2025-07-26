@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Optional
 from datetime import date
+from datetime import datetime
 
 class DashboardMetricCreate(BaseModel):
     timestamp: date
@@ -54,3 +55,19 @@ class NiiDriverCreate(BaseModel):
     nii_contribution: float
     breakdown_type: Optional[str] = None
     breakdown_value: Optional[str] = None
+
+class YieldCurveCreate(BaseModel):
+    scenario: str
+    tenor: str
+    rate: float
+    timestamp: Optional[datetime] = None
+
+class YieldCurveResponse(BaseModel):
+    id: int
+    scenario: str
+    tenor: str
+    rate: float
+    timestamp: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True

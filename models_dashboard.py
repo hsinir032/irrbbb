@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, Date, DateTime
 from sqlalchemy.orm import relationship
 from database import Base
 
@@ -66,3 +66,11 @@ class NiiDriver(Base):
     nii_contribution = Column(Float)
     breakdown_type = Column(String, nullable=True)  # e.g., instrument, type, bucket
     breakdown_value = Column(String, nullable=True)  # e.g., instrument id, type name, bucket name
+
+class YieldCurve(Base):
+    __tablename__ = "yield_curves"
+    id = Column(Integer, primary_key=True, index=True)
+    scenario = Column(String, nullable=False)  # e.g., "Base Case", "Parallel Up +200bps"
+    tenor = Column(String, nullable=False)     # e.g., "1M", "3M", "1Y", etc.
+    rate = Column(Float, nullable=False)       # e.g., 0.045 for 4.5%
+    timestamp = Column(DateTime, nullable=True)  # Optional: when this curve was generated
