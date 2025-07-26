@@ -2,8 +2,8 @@ from sqlalchemy.orm import Session
 import models_dashboard, schemas_dashboard
 from datetime import date, datetime
 from typing import List, Dict, Optional
-from .models_dashboard import CashflowLadder
-from .schemas_dashboard import CashflowLadderCreate
+from models_dashboard import CashflowLadder
+from schemas_dashboard import CashflowLadderCreate
 
 def save_dashboard_metric(db: Session, metric: schemas_dashboard.DashboardMetricCreate):
     record = models_dashboard.DashboardMetric(**metric.dict())

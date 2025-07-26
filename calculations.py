@@ -11,7 +11,8 @@ import schemas
 
 from crud_dashboard import *
 from schemas_dashboard import *
-from models_dashboard import NiiDriver, EveDriver, RepricingBucket, RepricingNetPosition, PortfolioComposition, YieldCurve
+from models_dashboard import NiiDriver, EveDriver, RepricingBucket, RepricingNetPosition, PortfolioComposition, YieldCurve, CashflowLadder
+from schemas_dashboard import CashflowLadderCreate
 
 # In-memory store for scenario history (for demonstration)
 _scenario_history: List[Dict[str, Any]] = []
