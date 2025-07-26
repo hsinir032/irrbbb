@@ -17,6 +17,7 @@ from sqlalchemy.orm import sessionmaker, Session
 import models
 import schemas
 import crud
+import schemas_dashboard
 from calculations import generate_dashboard_data_from_db
 
 # --- FastAPI App Initialization ---

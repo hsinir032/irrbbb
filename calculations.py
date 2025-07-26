@@ -261,40 +261,72 @@ def generate_deposit_cashflows(deposit: models.Deposit, yield_curve: Dict[str, f
 
 def calculate_derivative_pv(derivative: models.Derivative, yield_curve: Dict[str, float], today: date) -> float:
     """
-    Highly simplified PV calculation for an Interest Rate Swap.
-    This is a very basic conceptual model, not a true swap valuation.
-    Assumes net present value is based on difference in fixed vs. interpolated floating rate
-    applied to notional for remaining term.
+    Calculates the present value of a derivative (interest rate swap).
+    For swaps, PV = (Fixed Rate - Floating Rate) * Notional * Remaining Term
     """
-    if derivative.type != "Interest Rate Swap":
-        return 0.0
-
-    if derivative.end_date <= today:
-        return 0.0
-
+    if derivative.start_date > today or derivative.end_date <= today:
+        return 0.0  # Swap hasn't started or has ended
+    
+    # Calculate remaining term in years
     remaining_days = (derivative.end_date - today).days
     remaining_years = remaining_days / 365.0
-
+    
     if remaining_years <= 0:
         return 0.0
-
-    current_floating_rate_for_valuation = interpolate_rate(yield_curve, remaining_days) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
-
-    fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
-
-    if derivative.subtype == "Payer Swap":
-        net_rate_diff = current_floating_rate_for_valuation - fixed_rate
-    elif derivative.subtype == "Receiver Swap":
-        net_rate_diff = fixed_rate - current_floating_rate_for_valuation
-    else:
-        net_rate_diff = 0
-
-    discount_rate = interpolate_rate(yield_curve, remaining_days)
     
+    # Get current floating rate (interpolated from yield curve)
+    current_floating_rate_for_valuation = interpolate_rate(yield_curve, remaining_days) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
+    
+    # Calculate net annual payment
+    fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
+    if derivative.subtype == "Payer Swap":
+        net_annual_payment = (current_floating_rate_for_valuation - fixed_rate) * derivative.notional
+    elif derivative.subtype == "Receiver Swap":
+        net_annual_payment = (fixed_rate - current_floating_rate_for_valuation) * derivative.notional
+    else:
+        return 0.0  # Unknown swap type
+    
+    # Calculate PV using simple discounting
+    discount_rate = interpolate_rate(yield_curve, remaining_days)
     discount_factor = 1 / (1 + discount_rate * remaining_years)
-
-    pv = derivative.notional * net_rate_diff * remaining_years * discount_factor
+    pv = net_annual_payment * remaining_years * discount_factor
+    
     return pv
+
+def generate_derivative_cashflows(derivative: models.Derivative, yield_curve: Dict[str, float], today: date) -> List[Tuple[date, float]]:
+    """
+    Generates projected cash flows for a derivative (interest rate swap).
+    Returns a list of (date, amount) tuples.
+    """
+    if derivative.start_date > today or derivative.end_date <= today:
+        return []  # Swap hasn't started or has ended
+    
+    cashflows = []
+    fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
+    
+    # Generate cash flows for each payment period
+    payment_date = derivative.start_date
+    while payment_date <= derivative.end_date and payment_date > today:
+        # Calculate floating rate for this period
+        days_to_payment = (payment_date - today).days
+        if days_to_payment <= 0:
+            payment_date += timedelta(days=365)  # Move to next year
+            continue
+            
+        floating_rate = interpolate_rate(yield_curve, days_to_payment) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
+        
+        # Calculate net payment
+        if derivative.subtype == "Payer Swap":
+            net_payment = (floating_rate - fixed_rate) * derivative.notional
+        elif derivative.subtype == "Receiver Swap":
+            net_payment = (fixed_rate - floating_rate) * derivative.notional
+        else:
+            net_payment = 0
+        
+        cashflows.append((payment_date, net_payment))
+        payment_date += timedelta(days=365)  # Annual payments
+    
+    return cashflows
 
 
 def get_bucket(item_date: date, today: date, buckets: Dict[str, int]) -> str:
@@ -700,10 +732,10 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         for derivative in derivatives:
             if getattr(derivative, 'subtype', None) != "Receiver Swap":
                 continue
-            # For derivatives, you may want to use a similar cash flow approach if available
-            # For now, set duration to None or implement if you have cash flow logic
-            base_pv = calculate_derivative_pv(derivative, curve, today)
-            duration = None  # Placeholder, implement if you have derivative cash flows
+            # Generate cash flows for derivatives and calculate duration
+            derivative_cfs = generate_derivative_cashflows(derivative, curve, today)
+            base_pv = calculate_pv_of_cashflows(derivative_cfs, curve, today)
+            duration = calculate_modified_duration(derivative_cfs, curve, today)
             eve_driver_records.append(EveDriverCreate(
                 scenario=scenario_name,
                 instrument_id=str(derivative.id),
@@ -791,7 +823,8 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             bucket=bucket_name,
             instrument_type="Loan",
             instrument_id=str(loan.id),
-            amount=loan.notional
+            notional=loan.notional,
+            position="asset"
         ))
     # Deposits (liabilities)
     for deposit in deposits:
@@ -806,7 +839,8 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             bucket=bucket_name,
             instrument_type="Deposit",
             instrument_id=str(deposit.id),
-            amount=deposit.balance
+            notional=deposit.balance,
+            position="liability"
         ))
     # Derivatives
     for derivative in derivatives:
@@ -823,7 +857,8 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 bucket=bucket_name,
                 instrument_type="Derivative",
                 instrument_id=str(derivative.id),
-                amount=derivative.notional
+                notional=derivative.notional,
+                position="asset"
             ))
         elif derivative.subtype == "Receiver Swap":
             repricing_buckets.append(RepricingBucketCreate(
@@ -831,7 +866,8 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 bucket=bucket_name,
                 instrument_type="Derivative",
                 instrument_id=str(derivative.id),
-                amount=derivative.notional
+                notional=derivative.notional,
+                position="liability"
             ))
         else:
             repricing_buckets.append(RepricingBucketCreate(
@@ -839,7 +875,8 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 bucket="Fixed Rate / Non-Sensitive",
                 instrument_type="Derivative",
                 instrument_id=str(derivative.id),
-                amount=derivative.notional
+                notional=derivative.notional,
+                position="asset"
             ))
     # Delete and save repricing buckets
     db.query(RepricingBucket).filter(RepricingBucket.scenario == "Base Case").delete(synchronize_session=False)
@@ -851,9 +888,11 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         net_positions.append(RepricingNetPositionCreate(
             scenario="Base Case",
             bucket=bucket.bucket,
-            assets=bucket.assets,
-            liabilities=bucket.liabilities,
-            net_position=bucket.gap
+            total_assets=bucket.assets,
+            total_liabilities=bucket.liabilities,
+            net_position=bucket.gap,
+            nii_base=base_case_nii,
+            nii_shocked=nii_up_200bps if nii_up_200bps else base_case_nii
         ))
     # Delete and save net positions
     db.query(RepricingNetPosition).filter(RepricingNetPosition.scenario == "Base Case").delete(synchronize_session=False)
