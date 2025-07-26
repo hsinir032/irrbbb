@@ -19,6 +19,9 @@ import schemas
 import crud
 import schemas_dashboard
 from calculations import generate_dashboard_data_from_db
+from fastapi import Query
+from typing import List
+from models_dashboard import CashflowLadder
 
 # --- FastAPI App Initialization ---
 app = FastAPI(
@@ -263,6 +266,57 @@ def get_yield_curves_endpoint(scenario: Optional[str] = None, db: Session = Depe
     """Fetches yield curves from database, optionally filtered by scenario."""
     curves = get_yield_curves(db, scenario)
     return [schemas_dashboard.YieldCurveResponse.from_orm(curve) for curve in curves]
+
+@app.get("/api/v1/cashflow-ladder")
+def get_cashflow_ladder(
+    scenario: str = Query("Base Case"),
+    instrument_type: str = Query("all"),
+    aggregation: str = Query("assets"),  # 'assets', 'liabilities', 'net'
+    cashflow_type: str = Query("pv"),    # 'total' or 'pv'
+    db: Session = Depends(get_db)
+):
+    # Query and filter cashflow ladder
+    q = db.query(CashflowLadder).filter(CashflowLadder.scenario == scenario)
+    if instrument_type != "all":
+        q = q.filter(CashflowLadder.instrument_type == instrument_type)
+    records = q.all()
+    # Group by time (month/year)
+    buckets = {}
+    for rec in records:
+        # Only aggregate by asset/liability as requested
+        if aggregation == "assets" and rec.asset_liability != "A":
+            continue
+        if aggregation == "liabilities" and rec.asset_liability != "L":
+            continue
+        key = rec.cashflow_date.strftime("%Y-%m")
+        if key not in buckets:
+            buckets[key] = {"time_label": key, "fixed": 0.0, "floating": 0.0}
+        val_fixed = rec.fixed_component if cashflow_type == "total" else rec.pv * (rec.fixed_component / rec.total_cashflow) if rec.total_cashflow else 0.0
+        val_floating = rec.floating_component if cashflow_type == "total" else rec.pv * (rec.floating_component / rec.total_cashflow) if rec.total_cashflow else 0.0
+        buckets[key]["fixed"] += val_fixed
+        buckets[key]["floating"] += val_floating
+    # If net, subtract liabilities from assets
+    if aggregation == "net":
+        # Re-query for liabilities
+        qL = db.query(CashflowLadder).filter(CashflowLadder.scenario == scenario)
+        if instrument_type != "all":
+            qL = qL.filter(CashflowLadder.instrument_type == instrument_type)
+        recsL = [r for r in qL.all() if r.asset_liability == "L"]
+        for rec in recsL:
+            key = rec.cashflow_date.strftime("%Y-%m")
+            val_fixed = rec.fixed_component if cashflow_type == "total" else rec.pv * (rec.fixed_component / rec.total_cashflow) if rec.total_cashflow else 0.0
+            val_floating = rec.floating_component if cashflow_type == "total" else rec.pv * (rec.floating_component / rec.total_cashflow) if rec.total_cashflow else 0.0
+            if key not in buckets:
+                buckets[key] = {"time_label": key, "fixed": 0.0, "floating": 0.0}
+            buckets[key]["fixed"] -= val_fixed
+            buckets[key]["floating"] -= val_floating
+    # Return sorted by time
+    return [buckets[k] for k in sorted(buckets.keys())]
+
+@app.get("/api/v1/cashflow-ladder/instrument-types")
+def get_cashflow_ladder_instrument_types(db: Session = Depends(get_db)):
+    types = db.query(CashflowLadder.instrument_type).distinct().all()
+    return [t[0] for t in types if t[0]]
 
 # --- Create missing dashboard tables (only runs once) ---
 try:
