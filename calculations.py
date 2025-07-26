@@ -411,23 +411,33 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
     total_pv_liabilities = 0.0
     total_pv_derivatives = 0.0
 
+    print('--- EVE Asset PVs (Loans) ---')
     for loan in loans:
         if loan.type == "Cash":
             continue
-        # HTM Securities are treated as fixed rate, fixed maturity assets (no special handling needed)
         loan_cfs = generate_loan_cashflows(loan, yield_curve, today, include_principal=True, prepayment_rate=prepayment_rate)
-        total_pv_assets += calculate_pv_of_cashflows(loan_cfs, yield_curve, today)
+        pv = calculate_pv_of_cashflows(loan_cfs, yield_curve, today)
+        print(f"Loan {loan.instrument_id} ({loan.type}): PV = {pv:,.2f}")
+        total_pv_assets += pv
 
+    print('--- EVE Liability PVs (Deposits) ---')
     for deposit in deposits:
         if deposit.type == "Equity":
             continue
         deposit_cfs = generate_deposit_cashflows(deposit, yield_curve, today, include_principal=True,
                                                  nmd_effective_maturity_years=nmd_effective_maturity_years,
                                                  nmd_deposit_beta=nmd_deposit_beta)
-        total_pv_liabilities += calculate_pv_of_cashflows(deposit_cfs, yield_curve, today)
+        pv = calculate_pv_of_cashflows(deposit_cfs, yield_curve, today)
+        print(f"Deposit {deposit.instrument_id} ({deposit.type}): PV = {pv:,.2f}")
+        total_pv_liabilities += pv
 
+    print('--- EVE Derivative PVs (Receiver Swaps) ---')
     for derivative in derivatives:
-        total_pv_derivatives += calculate_derivative_pv(derivative, yield_curve, today)
+        if getattr(derivative, 'subtype', None) != "Receiver Swap":
+            continue
+        pv = calculate_derivative_pv(derivative, yield_curve, today)
+        print(f"Derivative {derivative.instrument_id} (Receiver Swap): PV = {pv:,.2f}")
+        total_pv_derivatives += pv
 
     eve_value = total_pv_assets - abs(total_pv_liabilities) + total_pv_derivatives
 
