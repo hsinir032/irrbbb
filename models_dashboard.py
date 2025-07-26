@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, Float, Date, DateTime
 from sqlalchemy.orm import relationship
 from database import Base
+from datetime import datetime
 
 class DashboardMetric(Base):
     __tablename__ = "dashboard_metrics"
@@ -74,3 +75,19 @@ class YieldCurve(Base):
     tenor = Column(String, nullable=False)     # e.g., "1M", "3M", "1Y", etc.
     rate = Column(Float, nullable=False)       # e.g., 0.045 for 4.5%
     timestamp = Column(DateTime, nullable=True)  # Optional: when this curve was generated
+
+class CashflowLadder(Base):
+    __tablename__ = "cashflow_ladder"
+    id = Column(Integer, primary_key=True, index=True)
+    scenario = Column(String(50))
+    instrument_id = Column(String(50))
+    instrument_type = Column(String(50))
+    asset_liability = Column(String(1))  # 'A' or 'L'
+    cashflow_date = Column(Date)
+    time_months = Column(Integer)
+    fixed_component = Column(Float)
+    floating_component = Column(Float)
+    total_cashflow = Column(Float)
+    discount_factor = Column(Float)
+    pv = Column(Float)
+    created_at = Column(DateTime, default=datetime.utcnow)

@@ -71,3 +71,20 @@ class YieldCurveResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class CashflowLadderCreate(BaseModel):
+    scenario: str
+    instrument_id: str
+    instrument_type: str
+    asset_liability: str
+    cashflow_date: date
+    time_months: int
+    fixed_component: float
+    floating_component: float
+    total_cashflow: float
+    discount_factor: float
+    pv: float
+
+class CashflowLadderResponse(CashflowLadderCreate):
+    id: int
+    created_at: Optional[datetime] = None

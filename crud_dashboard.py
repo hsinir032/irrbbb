@@ -2,6 +2,8 @@ from sqlalchemy.orm import Session
 import models_dashboard, schemas_dashboard
 from datetime import date, datetime
 from typing import List, Dict, Optional
+from .models_dashboard import CashflowLadder
+from .schemas_dashboard import CashflowLadderCreate
 
 def save_dashboard_metric(db: Session, metric: schemas_dashboard.DashboardMetricCreate):
     record = models_dashboard.DashboardMetric(**metric.dict())
@@ -103,3 +105,12 @@ def get_nii_drivers_for_scenario_and_breakdown(db: Session, scenario: str, break
         models_dashboard.NiiDriver.scenario == scenario,
         models_dashboard.NiiDriver.breakdown_type == breakdown_type
     ).all()
+
+def delete_all_cashflow_ladder(db):
+    db.query(CashflowLadder).delete(synchronize_session=False)
+    db.commit()
+
+def save_cashflow_ladder(db, cashflow_ladder_records: list[CashflowLadderCreate]):
+    for record in cashflow_ladder_records:
+        db.add(CashflowLadder(**record.dict()))
+    db.commit()

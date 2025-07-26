@@ -1001,6 +1001,98 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     db.query(PortfolioComposition).filter(PortfolioComposition.instrument_type.in_(["Loan", "Deposit", "Derivative"])).delete(synchronize_session=False)
     save_portfolio_composition(db, portfolio_records)
     
+    # --- Save Cashflow Ladder ---
+    delete_all_cashflow_ladder(db)
+    cashflow_ladder_records = []
+    for scenario_name, shock_bps in INTEREST_RATE_SCENARIOS.items():
+        curve = BASE_YIELD_CURVE if scenario_name == "Base Case" else shock_yield_curve(BASE_YIELD_CURVE, shock_bps)
+        for loan in loans:
+            cfs = generate_loan_cashflows(loan, curve, today, include_principal=True, prepayment_rate=assumptions.prepayment_rate)
+            for cf_date, cf_amount in cfs:
+                months = (cf_date.year - today.year) * 12 + (cf_date.month - today.month)
+                # For fixed loans, all interest is fixed; for floating, split (simplified logic)
+                if loan.type in ["Fixed Rate Loan", "HTM Securities"]:
+                    fixed_component = cf_amount
+                    floating_component = 0.0
+                else:
+                    fixed_component = 0.0
+                    floating_component = cf_amount
+                total_cashflow = fixed_component + floating_component
+                days_to_maturity = (cf_date - today).days
+                discount_rate = interpolate_rate(curve, days_to_maturity)
+                discount_factor = 1 / (1 + discount_rate * (days_to_maturity / 365))
+                pv = total_cashflow * discount_factor
+                cashflow_ladder_records.append(CashflowLadderCreate(
+                    scenario=scenario_name,
+                    instrument_id=str(loan.id),
+                    instrument_type=loan.type,
+                    asset_liability="A",
+                    cashflow_date=cf_date,
+                    time_months=months,
+                    fixed_component=fixed_component,
+                    floating_component=floating_component,
+                    total_cashflow=total_cashflow,
+                    discount_factor=discount_factor,
+                    pv=pv
+                ))
+        for deposit in deposits:
+            cfs = generate_deposit_cashflows(deposit, curve, today, include_principal=True,
+                                             nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
+                                             nmd_deposit_beta=assumptions.nmd_deposit_beta)
+            for cf_date, cf_amount in cfs:
+                months = (cf_date.year - today.year) * 12 + (cf_date.month - today.month)
+                if deposit.type in ["CD", "Wholesale Funding"]:
+                    fixed_component = cf_amount
+                    floating_component = 0.0
+                else:
+                    fixed_component = 0.0
+                    floating_component = cf_amount
+                total_cashflow = fixed_component + floating_component
+                days_to_maturity = (cf_date - today).days
+                discount_rate = interpolate_rate(curve, days_to_maturity)
+                discount_factor = 1 / (1 + discount_rate * (days_to_maturity / 365))
+                pv = total_cashflow * discount_factor
+                cashflow_ladder_records.append(CashflowLadderCreate(
+                    scenario=scenario_name,
+                    instrument_id=str(deposit.id),
+                    instrument_type=deposit.type,
+                    asset_liability="L",
+                    cashflow_date=cf_date,
+                    time_months=months,
+                    fixed_component=fixed_component,
+                    floating_component=floating_component,
+                    total_cashflow=total_cashflow,
+                    discount_factor=discount_factor,
+                    pv=pv
+                ))
+        for derivative in derivatives:
+            if getattr(derivative, 'subtype', None) != "Receiver Swap":
+                continue
+            cfs = generate_derivative_cashflows(derivative, curve, today)
+            for cf_date, cf_amount in cfs:
+                months = (cf_date.year - today.year) * 12 + (cf_date.month - today.month)
+                # For swaps, split into fixed/floating if possible (simplified: all to floating)
+                fixed_component = 0.0
+                floating_component = cf_amount
+                total_cashflow = fixed_component + floating_component
+                days_to_maturity = (cf_date - today).days
+                discount_rate = interpolate_rate(curve, days_to_maturity)
+                discount_factor = 1 / (1 + discount_rate * (days_to_maturity / 365))
+                pv = total_cashflow * discount_factor
+                cashflow_ladder_records.append(CashflowLadderCreate(
+                    scenario=scenario_name,
+                    instrument_id=str(derivative.id),
+                    instrument_type=derivative.type,
+                    asset_liability="L",
+                    cashflow_date=cf_date,
+                    time_months=months,
+                    fixed_component=fixed_component,
+                    floating_component=floating_component,
+                    total_cashflow=total_cashflow,
+                    discount_factor=discount_factor,
+                    pv=pv
+                ))
+    save_cashflow_ladder(db, cashflow_ladder_records)
 
     return schemas.DashboardData(
         eve_sensitivity=eve_sensitivity,
