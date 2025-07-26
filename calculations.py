@@ -1011,15 +1011,21 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             cfs = generate_loan_cashflows(loan, curve, today, include_principal=True, prepayment_rate=assumptions.prepayment_rate)
             for cf_date, cf_amount in cfs:
                 months = (cf_date.year - today.year) * 12 + (cf_date.month - today.month)
-                # For fixed loans, all interest is fixed; for floating, split (simplified logic)
+                days_to_maturity = (cf_date - today).days
+                accrual_period = get_accrual_period(getattr(loan, 'payment_frequency', 'Annually'))
                 if loan.type in ["Fixed Rate Loan", "HTM Securities"]:
                     fixed_component = cf_amount
                     floating_component = 0.0
+                elif loan.type == "Floating Rate Loan":
+                    spread = loan.spread if hasattr(loan, 'spread') and loan.spread is not None else 0.0
+                    scenario_rate = interpolate_rate(curve, days_to_maturity)
+                    notional = loan.notional
+                    fixed_component = spread * notional * accrual_period
+                    floating_component = scenario_rate * notional * accrual_period
                 else:
                     fixed_component = 0.0
                     floating_component = cf_amount
                 total_cashflow = fixed_component + floating_component
-                days_to_maturity = (cf_date - today).days
                 discount_rate = interpolate_rate(curve, days_to_maturity)
                 discount_factor = 1 / (1 + discount_rate * (days_to_maturity / 365))
                 pv = total_cashflow * discount_factor
@@ -1042,14 +1048,21 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                                              nmd_deposit_beta=assumptions.nmd_deposit_beta)
             for cf_date, cf_amount in cfs:
                 months = (cf_date.year - today.year) * 12 + (cf_date.month - today.month)
+                days_to_maturity = (cf_date - today).days
+                accrual_period = get_accrual_period(getattr(deposit, 'payment_frequency', 'Annually'))
                 if deposit.type in ["CD", "Wholesale Funding"]:
                     fixed_component = cf_amount
                     floating_component = 0.0
+                elif deposit.type in ["Checking", "Savings"]:
+                    spread = getattr(deposit, 'spread', 0.0) or 0.0
+                    scenario_rate = interpolate_rate(curve, days_to_maturity)
+                    notional = deposit.balance
+                    fixed_component = spread * notional * accrual_period
+                    floating_component = scenario_rate * notional * accrual_period
                 else:
                     fixed_component = 0.0
                     floating_component = cf_amount
                 total_cashflow = fixed_component + floating_component
-                days_to_maturity = (cf_date - today).days
                 discount_rate = interpolate_rate(curve, days_to_maturity)
                 discount_factor = 1 / (1 + discount_rate * (days_to_maturity / 365))
                 pv = total_cashflow * discount_factor
@@ -1072,11 +1085,11 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             cfs = generate_derivative_cashflows(derivative, curve, today)
             for cf_date, cf_amount in cfs:
                 months = (cf_date.year - today.year) * 12 + (cf_date.month - today.month)
+                days_to_maturity = (cf_date - today).days
                 # For swaps, split into fixed/floating if possible (simplified: all to floating)
                 fixed_component = 0.0
                 floating_component = cf_amount
                 total_cashflow = fixed_component + floating_component
-                days_to_maturity = (cf_date - today).days
                 discount_rate = interpolate_rate(curve, days_to_maturity)
                 discount_factor = 1 / (1 + discount_rate * (days_to_maturity / 365))
                 pv = total_cashflow * discount_factor
@@ -1139,3 +1152,14 @@ def calculate_modified_duration(cashflows: List[Tuple[date, float]], yield_curve
     avg_yield = sum(interpolate_rate(yield_curve, (cf_date - today).days) for cf_date, _ in cashflows if cf_date > today) / max(1, len([1 for cf_date, _ in cashflows if cf_date > today]))
     modified_duration = macaulay_duration / (1 + avg_yield)
     return modified_duration
+
+def get_accrual_period(payment_frequency: str) -> float:
+    if payment_frequency == "Monthly":
+        return 1/12
+    elif payment_frequency == "Quarterly":
+        return 1/4
+    elif payment_frequency == "Semi-Annually":
+        return 1/2
+    elif payment_frequency == "Annually":
+        return 1.0
+    return 1.0  # Default to annual if missing
