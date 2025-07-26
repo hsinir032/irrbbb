@@ -742,9 +742,10 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         for derivative in derivatives:
             if getattr(derivative, 'subtype', None) != "Receiver Swap":
                 continue
-            # Generate cash flows for derivatives and calculate duration
+            # Use the same PV calculation method as EVE scenario table
+            base_pv = calculate_derivative_pv(derivative, curve, today)
+            # Generate cash flows for duration calculation only
             derivative_cfs = generate_derivative_cashflows(derivative, curve, today)
-            base_pv = calculate_pv_of_cashflows(derivative_cfs, curve, today)
             duration = calculate_modified_duration(derivative_cfs, curve, today)
             eve_driver_records.append(EveDriverCreate(
                 scenario=scenario_name,
