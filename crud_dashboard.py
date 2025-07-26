@@ -85,10 +85,20 @@ def delete_eve_drivers_for_scenario_and_date(db: Session, scenario: str, timesta
     db.commit()
 
 def get_nii_drivers_for_scenario_and_breakdown(db: Session, scenario: str, breakdown_type: str):
-    if breakdown_type is None or breakdown_type.lower() == 'all':
+    """Get NII drivers for a scenario and breakdown type.
+    
+    breakdown_type can be:
+    - 'instrument': Return all records (no filtering)
+    - 'type': Return records grouped by instrument_type (no filtering needed as each record has its type)
+    - 'bucket': Return records grouped by breakdown_value (no filtering needed as each record has its bucket)
+    - 'all': Return all records (no filtering)
+    """
+    if breakdown_type is None or breakdown_type.lower() in ['all', 'instrument', 'type', 'bucket']:
         return db.query(models_dashboard.NiiDriver).filter(
             models_dashboard.NiiDriver.scenario == scenario
         ).all()
+    
+    # For any other specific breakdown_type, filter by that value
     return db.query(models_dashboard.NiiDriver).filter(
         models_dashboard.NiiDriver.scenario == scenario,
         models_dashboard.NiiDriver.breakdown_type == breakdown_type

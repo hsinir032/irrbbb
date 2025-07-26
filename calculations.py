@@ -748,95 +748,104 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     db.query(EveDriver).delete(synchronize_session=False)
     save_eve_drivers(db, eve_driver_records)
 
-    # Save NII drivers (Base Case, per instrument)
+    # Save NII drivers for all scenarios
     nii_driver_records = []
-    # Loans
-    for loan in loans:
-        if loan.type == "Cash":
-            continue
-        loan_cfs = generate_loan_cashflows(loan, BASE_YIELD_CURVE, today, include_principal=False, prepayment_rate=assumptions.prepayment_rate)
-        nii_contribution = sum(cf_amount for cf_date, cf_amount in loan_cfs if today < cf_date <= today + timedelta(days=NII_HORIZON_DAYS))
-        bucket = get_bucket(loan.next_repricing_date if loan.next_repricing_date else loan.maturity_date, today, {
-            "0-3 Months": 90,
-            "3-6 Months": 180,
-            "6-12 Months": 365,
-            "1-5 Years": 365 * 5,
-            ">5 Years": 365 * 100,
-            "Fixed Rate / Non-Sensitive": -1
-        })
-        nii_driver_records.append(NiiDriverCreate(
-            scenario="Base Case",
-            instrument_id=str(loan.id),
-            instrument_type=loan.type,
-            nii_contribution=nii_contribution,
-            breakdown_type=loan.type,
-            breakdown_value=bucket
-        ))
-    # Deposits
-    for deposit in deposits:
-        if deposit.type == "Equity":
-            continue
-        deposit_cfs = generate_deposit_cashflows(deposit, BASE_YIELD_CURVE, today, include_principal=False,
-                                             nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
-                                             nmd_deposit_beta=assumptions.nmd_deposit_beta)
-        nii_contribution = -sum(abs(cf_amount) for cf_date, cf_amount in deposit_cfs if today < cf_date <= today + timedelta(days=NII_HORIZON_DAYS))
-        bucket = get_bucket(deposit.next_repricing_date if deposit.next_repricing_date else deposit.maturity_date, today, {
-            "0-3 Months": 90,
-            "3-6 Months": 180,
-            "6-12 Months": 365,
-            "1-5 Years": 365 * 5,
-            ">5 Years": 365 * 100,
-            "Fixed Rate / Non-Sensitive": -1
-        })
-        nii_driver_records.append(NiiDriverCreate(
-            scenario="Base Case",
-            instrument_id=str(deposit.id),
-            instrument_type=deposit.type,
-            nii_contribution=nii_contribution,
-            breakdown_type=deposit.type,
-            breakdown_value=bucket
-        ))
-    # Derivatives
-    for derivative in derivatives:
-        if getattr(derivative, 'subtype', None) != "Receiver Swap":
-            continue
-        if derivative.start_date <= today and derivative.end_date > today:
-            fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
-            floating_rate_for_nii = interpolate_rate(BASE_YIELD_CURVE, 365) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
+    for scenario_name, shock_bps in INTEREST_RATE_SCENARIOS.items():
+        if scenario_name == "Base Case":
+            curve = BASE_YIELD_CURVE
+        else:
+            curve = shock_yield_curve(BASE_YIELD_CURVE, shock_bps)
+        
+        # Loans
+        for loan in loans:
+            if loan.type == "Cash":
+                continue
+            loan_cfs = generate_loan_cashflows(loan, curve, today, include_principal=False, prepayment_rate=assumptions.prepayment_rate)
+            nii_contribution = sum(cf_amount for cf_date, cf_amount in loan_cfs if today < cf_date <= today + timedelta(days=NII_HORIZON_DAYS))
+            bucket = get_bucket(loan.next_repricing_date if loan.next_repricing_date else loan.maturity_date, today, {
+                "0-3 Months": 90,
+                "3-6 Months": 180,
+                "6-12 Months": 365,
+                "1-5 Years": 365 * 5,
+                ">5 Years": 365 * 100,
+                "Fixed Rate / Non-Sensitive": -1
+            })
+            nii_driver_records.append(NiiDriverCreate(
+                scenario=scenario_name,
+                instrument_id=str(loan.id),
+                instrument_type=loan.type,
+                nii_contribution=nii_contribution,
+                breakdown_type=loan.type,
+                breakdown_value=bucket
+            ))
+        
+        # Deposits
+        for deposit in deposits:
+            if deposit.type == "Equity":
+                continue
+            deposit_cfs = generate_deposit_cashflows(deposit, curve, today, include_principal=False,
+                                                 nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
+                                                 nmd_deposit_beta=assumptions.nmd_deposit_beta)
+            nii_contribution = -sum(abs(cf_amount) for cf_date, cf_amount in deposit_cfs if today < cf_date <= today + timedelta(days=NII_HORIZON_DAYS))
+            bucket = get_bucket(deposit.next_repricing_date if deposit.next_repricing_date else deposit.maturity_date, today, {
+                "0-3 Months": 90,
+                "3-6 Months": 180,
+                "6-12 Months": 365,
+                "1-5 Years": 365 * 5,
+                ">5 Years": 365 * 100,
+                "Fixed Rate / Non-Sensitive": -1
+            })
+            nii_driver_records.append(NiiDriverCreate(
+                scenario=scenario_name,
+                instrument_id=str(deposit.id),
+                instrument_type=deposit.type,
+                nii_contribution=nii_contribution,
+                breakdown_type=deposit.type,
+                breakdown_value=bucket
+            ))
+        
+        # Derivatives
+        for derivative in derivatives:
+            if getattr(derivative, 'subtype', None) != "Receiver Swap":
+                continue
+            if derivative.start_date <= today and derivative.end_date > today:
+                fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
+                floating_rate_for_nii = interpolate_rate(curve, 365) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
 
-            if derivative.subtype == "Payer Swap":
-                net_annual_interest = (floating_rate_for_nii - fixed_rate) * derivative.notional
-            elif derivative.subtype == "Receiver Swap":
-                net_annual_interest = (fixed_rate - floating_rate_for_nii) * derivative.notional
-            else:
-                net_annual_interest = 0
+                if derivative.subtype == "Payer Swap":
+                    net_annual_interest = (floating_rate_for_nii - fixed_rate) * derivative.notional
+                elif derivative.subtype == "Receiver Swap":
+                    net_annual_interest = (fixed_rate - floating_rate_for_nii) * derivative.notional
+                else:
+                    net_annual_interest = 0
 
-            if (derivative.end_date - today).days > 0:
-                proration_factor = min(1.0, (min(derivative.end_date, today + timedelta(days=NII_HORIZON_DAYS)) - today).days / 365.0)
-                nii_contribution = net_annual_interest * proration_factor
+                if (derivative.end_date - today).days > 0:
+                    proration_factor = min(1.0, (min(derivative.end_date, today + timedelta(days=NII_HORIZON_DAYS)) - today).days / 365.0)
+                    nii_contribution = net_annual_interest * proration_factor
+                else:
+                    nii_contribution = 0
             else:
                 nii_contribution = 0
-        else:
-            nii_contribution = 0
 
-        bucket = get_bucket(derivative.end_date, today, {
-            "0-3 Months": 90,
-            "3-6 Months": 180,
-            "6-12 Months": 365,
-            "1-5 Years": 365 * 5,
-            ">5 Years": 365 * 100,
-            "Fixed Rate / Non-Sensitive": -1
-        })
-        nii_driver_records.append(NiiDriverCreate(
-            scenario="Base Case",
-            instrument_id=str(derivative.id),
-            instrument_type=derivative.type,
-            nii_contribution=nii_contribution,
-            breakdown_type=derivative.type,
-            breakdown_value=bucket
-        ))
-    # Delete and save NII drivers for Base Case
-    db.query(NiiDriver).filter(NiiDriver.scenario == "Base Case").delete(synchronize_session=False)
+            bucket = get_bucket(derivative.end_date, today, {
+                "0-3 Months": 90,
+                "3-6 Months": 180,
+                "6-12 Months": 365,
+                "1-5 Years": 365 * 5,
+                ">5 Years": 365 * 100,
+                "Fixed Rate / Non-Sensitive": -1
+            })
+            nii_driver_records.append(NiiDriverCreate(
+                scenario=scenario_name,
+                instrument_id=str(derivative.id),
+                instrument_type=derivative.type,
+                nii_contribution=nii_contribution,
+                breakdown_type=derivative.type,
+                breakdown_value=bucket
+            ))
+    
+    # Delete and save NII drivers for all scenarios
+    db.query(NiiDriver).delete(synchronize_session=False)
     save_nii_drivers(db, nii_driver_records)
 
     # Populate repricing_buckets for all instruments
