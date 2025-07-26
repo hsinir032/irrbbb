@@ -429,7 +429,7 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
     for derivative in derivatives:
         total_pv_derivatives += calculate_derivative_pv(derivative, yield_curve, today)
 
-    eve_value = total_pv_assets + total_pv_liabilities + total_pv_derivatives
+    eve_value = total_pv_assets - abs(total_pv_liabilities) + total_pv_derivatives
 
     return {
         "net_interest_income": net_interest_income,
@@ -794,6 +794,45 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             instrument_type=deposit.type,
             nii_contribution=nii_contribution,
             breakdown_type=deposit.type,
+            breakdown_value=bucket
+        ))
+    # Derivatives
+    for derivative in derivatives:
+        if getattr(derivative, 'subtype', None) != "Receiver Swap":
+            continue
+        if derivative.start_date <= today and derivative.end_date > today:
+            fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
+            floating_rate_for_nii = interpolate_rate(BASE_YIELD_CURVE, 365) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
+
+            if derivative.subtype == "Payer Swap":
+                net_annual_interest = (floating_rate_for_nii - fixed_rate) * derivative.notional
+            elif derivative.subtype == "Receiver Swap":
+                net_annual_interest = (fixed_rate - floating_rate_for_nii) * derivative.notional
+            else:
+                net_annual_interest = 0
+
+            if (derivative.end_date - today).days > 0:
+                proration_factor = min(1.0, (min(derivative.end_date, today + timedelta(days=NII_HORIZON_DAYS)) - today).days / 365.0)
+                nii_contribution = net_annual_interest * proration_factor
+            else:
+                nii_contribution = 0
+        else:
+            nii_contribution = 0
+
+        bucket = get_bucket(derivative.end_date, today, {
+            "0-3 Months": 90,
+            "3-6 Months": 180,
+            "6-12 Months": 365,
+            "1-5 Years": 365 * 5,
+            ">5 Years": 365 * 100,
+            "Fixed Rate / Non-Sensitive": -1
+        })
+        nii_driver_records.append(NiiDriverCreate(
+            scenario="Base Case",
+            instrument_id=str(derivative.id),
+            instrument_type=derivative.type,
+            nii_contribution=nii_contribution,
+            breakdown_type=derivative.type,
             breakdown_value=bucket
         ))
     # Delete and save NII drivers for Base Case
