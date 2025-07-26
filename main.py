@@ -193,9 +193,26 @@ def get_dashboard_snapshot(db: Session = Depends(get_db)):
     return get_latest_dashboard_metrics(db)
 
 @app.get("/api/v1/dashboard/eve-drivers")
-def get_eve_drivers(scenario: str = "Parallel Up +200bps", db: Session = Depends(get_db)):
-    """Fetches PVs of instruments (before/after shock) to explain EVE impact."""
-    return get_eve_drivers_for_scenario(db, scenario)
+def get_eve_drivers(
+    scenarios: Optional[str] = Query(None, description="Comma-separated list of scenarios"),
+    db: Session = Depends(get_db)
+):
+    """
+    Fetches PVs of instruments (before/after shock) to explain EVE impact.
+    If 'scenarios' is provided, returns drivers for all listed scenarios as a flat list.
+    """
+    if scenarios:
+        scenario_list = [s.strip() for s in scenarios.split(",")]
+        all_drivers = []
+        for scenario in scenario_list:
+            drivers = get_eve_drivers_for_scenario(db, scenario)
+            for drv in drivers:
+                drv_dict = drv.__dict__.copy()
+                drv_dict["scenario"] = scenario
+                all_drivers.append(drv_dict)
+        return all_drivers
+    else:
+        return get_eve_drivers_for_scenario(db, "Parallel Up +200bps")
 
 @app.get("/api/v1/dashboard/net-positions")
 def get_net_positions(scenario: str = "Base Case", db: Session = Depends(get_db)):
@@ -219,9 +236,27 @@ def get_portfolio_composition_summary(db: Session = Depends(get_db)):
     }
 
 @app.get("/api/v1/dashboard/nii-drivers")
-def get_nii_drivers(scenario: str = "Base Case", breakdown: str = "instrument", db: Session = Depends(get_db)):
-    """Fetches NII drivers for a scenario and breakdown (instrument, type, or bucket)."""
-    return get_nii_drivers_for_scenario_and_breakdown(db, scenario, breakdown)
+def get_nii_drivers(
+    scenarios: Optional[str] = Query(None, description="Comma-separated list of scenarios"),
+    breakdown: str = "instrument",
+    db: Session = Depends(get_db)
+):
+    """
+    Fetches NII drivers for one or more scenarios and breakdown (instrument, type, or bucket).
+    If 'scenarios' is provided, returns drivers for all listed scenarios as a flat list.
+    """
+    if scenarios:
+        scenario_list = [s.strip() for s in scenarios.split(",")]
+        all_drivers = []
+        for scenario in scenario_list:
+            drivers = get_nii_drivers_for_scenario_and_breakdown(db, scenario, breakdown)
+            for drv in drivers:
+                drv_dict = drv.__dict__.copy()
+                drv_dict["scenario"] = scenario
+                all_drivers.append(drv_dict)
+        return all_drivers
+    else:
+        return get_nii_drivers_for_scenario_and_breakdown(db, "Base Case", breakdown)
 
 @app.get("/api/v1/yield-curves")
 def get_yield_curves_endpoint(scenario: Optional[str] = None, db: Session = Depends(get_db)):
