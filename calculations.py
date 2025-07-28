@@ -391,15 +391,15 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
         if derivative.subtype == "Receiver Swap":
             # Receiver Swap: We receive fixed (asset), pay floating (liability)
             total_pv_assets += fixed_pv
-            total_pv_liabilities += floating_pv
+            total_pv_liabilities += -floating_pv  # Negative for liability
         elif derivative.subtype == "Payer Swap":
             # Payer Swap: We pay fixed (liability), receive floating (asset)
             total_pv_assets += floating_pv
-            total_pv_liabilities += fixed_pv
+            total_pv_liabilities += -fixed_pv  # Negative for liability
         else:
             # For other swap types, treat as separate legs
             total_pv_assets += fixed_pv
-            total_pv_liabilities += floating_pv
+            total_pv_liabilities += -floating_pv  # Negative for liability
 
     eve_value = total_pv_assets - abs(total_pv_liabilities) + total_pv_derivatives
 
