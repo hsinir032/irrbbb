@@ -11,7 +11,7 @@ import schemas
 
 from crud_dashboard import *
 from schemas_dashboard import *
-from models_dashboard import NiiDriver, EveDriver, RepricingBucket, RepricingNetPosition, PortfolioComposition, YieldCurve, CashflowLadder
+from models_dashboard import NiiDriver, EveDriver, RepricingBucket, PortfolioComposition, YieldCurve, CashflowLadder
 from schemas_dashboard import CashflowLadderCreate, RepricingBucketCreate
 
 # In-memory store for scenario history (for demonstration)
@@ -837,38 +837,78 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 duration=duration
             ))
         for derivative in derivatives:
-            # Use the same PV calculation method as EVE scenario table
-            base_pv = calculate_derivative_pv(derivative, curve, today)
             # Generate cash flows for duration calculation only
             derivative_cfs = generate_derivative_cashflows(derivative, curve, today)
-            duration = calculate_modified_duration(derivative_cfs, curve, today)
             
-            # Determine the appropriate instrument type based on swap type and PV sign
+            # Calculate fixed and floating components
+            fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
+            floating_rate = interpolate_rate(curve, 365) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
+            notional = derivative.notional
+            
+            # Calculate fixed and floating payments
+            accrual_period = get_accrual_period(getattr(derivative, 'fixed_payment_frequency', 'Annually'))
+            fixed_payment = fixed_rate * notional * accrual_period
+            floating_payment = floating_rate * notional * accrual_period
+            
+            # Calculate PV of each component
+            discount_rate = interpolate_rate(curve, 365)
+            discount_factor = 1 / (1 + discount_rate * 1)  # 1 year horizon
+            fixed_pv = fixed_payment * discount_factor
+            floating_pv = floating_payment * discount_factor
+            
+            # Calculate duration for each leg
+            fixed_duration = calculate_modified_duration(derivative_cfs, curve, today)
+            floating_duration = calculate_modified_duration(derivative_cfs, curve, today)
+            
+            # Create separate records for fixed and floating legs
             if derivative.subtype == "Receiver Swap":
-                if base_pv > 0:
-                    # Positive PV: Fixed leg is asset
-                    instrument_type = "Derivative (Fixed Asset)"
-                else:
-                    # Negative PV: Floating leg is liability
-                    instrument_type = "Derivative (Floating Liability)"
+                # Fixed leg is asset, floating leg is liability
+                eve_driver_records.append(EveDriverCreate(
+                    scenario=scenario_name,
+                    instrument_id=str(derivative.id) + "_fixed",
+                    instrument_type="Derivative (Fixed Asset)",
+                    base_pv=abs(fixed_pv),
+                    shocked_pv=None,
+                    duration=fixed_duration
+                ))
+                eve_driver_records.append(EveDriverCreate(
+                    scenario=scenario_name,
+                    instrument_id=str(derivative.id) + "_floating",
+                    instrument_type="Derivative (Floating Liability)",
+                    base_pv=abs(floating_pv),
+                    shocked_pv=None,
+                    duration=floating_duration
+                ))
             elif derivative.subtype == "Payer Swap":
-                if base_pv > 0:
-                    # Positive PV: Floating leg is asset
-                    instrument_type = "Derivative (Floating Asset)"
-                else:
-                    # Negative PV: Fixed leg is liability
-                    instrument_type = "Derivative (Fixed Liability)"
+                # Fixed leg is liability, floating leg is asset
+                eve_driver_records.append(EveDriverCreate(
+                    scenario=scenario_name,
+                    instrument_id=str(derivative.id) + "_fixed",
+                    instrument_type="Derivative (Fixed Liability)",
+                    base_pv=abs(fixed_pv),
+                    shocked_pv=None,
+                    duration=fixed_duration
+                ))
+                eve_driver_records.append(EveDriverCreate(
+                    scenario=scenario_name,
+                    instrument_id=str(derivative.id) + "_floating",
+                    instrument_type="Derivative (Floating Asset)",
+                    base_pv=abs(floating_pv),
+                    shocked_pv=None,
+                    duration=floating_duration
+                ))
             else:
-                instrument_type = derivative.type
-            
-            eve_driver_records.append(EveDriverCreate(
-                scenario=scenario_name,
-                instrument_id=str(derivative.id),
-                instrument_type=instrument_type,
-                base_pv=abs(base_pv),  # Store absolute value
-                shocked_pv=None,
-                duration=duration
-            ))
+                # For other derivative types, treat as single net position
+                base_pv = calculate_derivative_pv(derivative, curve, today)
+                duration = calculate_modified_duration(derivative_cfs, curve, today)
+                eve_driver_records.append(EveDriverCreate(
+                    scenario=scenario_name,
+                    instrument_id=str(derivative.id),
+                    instrument_type=derivative.type,
+                    base_pv=abs(base_pv),
+                    shocked_pv=None,
+                    duration=duration
+                ))
     # Delete and save EVE drivers for all scenarios
     db.query(EveDriver).delete(synchronize_session=False)
     save_eve_drivers(db, eve_driver_records)
@@ -935,38 +975,20 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
                 floating_rate_for_nii = interpolate_rate(curve, 365) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
 
-                if derivative.subtype == "Payer Swap":
-                    net_annual_interest = (floating_rate_for_nii - fixed_rate) * derivative.notional
-                elif derivative.subtype == "Receiver Swap":
-                    net_annual_interest = (fixed_rate - floating_rate_for_nii) * derivative.notional
-                else:
-                    net_annual_interest = 0
+                # Calculate fixed and floating NII contributions
+                fixed_nii = fixed_rate * derivative.notional
+                floating_nii = floating_rate_for_nii * derivative.notional
 
                 if (derivative.end_date - today).days > 0:
                     proration_factor = min(1.0, (min(derivative.end_date, today + timedelta(days=NII_HORIZON_DAYS)) - today).days / 365.0)
-                    nii_contribution = net_annual_interest * proration_factor
+                    fixed_nii_contribution = fixed_nii * proration_factor
+                    floating_nii_contribution = floating_nii * proration_factor
                 else:
-                    nii_contribution = 0
+                    fixed_nii_contribution = 0
+                    floating_nii_contribution = 0
             else:
-                nii_contribution = 0
-
-            # Determine the appropriate instrument type based on swap type and NII contribution sign
-            if derivative.subtype == "Receiver Swap":
-                if nii_contribution > 0:
-                    # Positive NII: Fixed leg is asset
-                    instrument_type = "Derivative (Fixed Asset)"
-                else:
-                    # Negative NII: Floating leg is liability
-                    instrument_type = "Derivative (Floating Liability)"
-            elif derivative.subtype == "Payer Swap":
-                if nii_contribution > 0:
-                    # Positive NII: Floating leg is asset
-                    instrument_type = "Derivative (Floating Asset)"
-                else:
-                    # Negative NII: Fixed leg is liability
-                    instrument_type = "Derivative (Fixed Liability)"
-            else:
-                instrument_type = derivative.type
+                fixed_nii_contribution = 0
+                floating_nii_contribution = 0
 
             bucket = get_bucket(derivative.end_date, today, {
                 "0-3 Months": 90,
@@ -976,14 +998,55 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 ">5 Years": 365 * 100,
                 "Fixed Rate / Non-Sensitive": -1
             })
-            nii_driver_records.append(NiiDriverCreate(
-                scenario=scenario_name,
-                instrument_id=str(derivative.id),
-                instrument_type=instrument_type,
-                nii_contribution=abs(nii_contribution),  # Store absolute value
-                breakdown_type=derivative.type,
-                breakdown_value=bucket
-            ))
+
+            # Create separate records for fixed and floating legs
+            if derivative.subtype == "Receiver Swap":
+                # Fixed leg is asset, floating leg is liability
+                nii_driver_records.append(NiiDriverCreate(
+                    scenario=scenario_name,
+                    instrument_id=str(derivative.id) + "_fixed",
+                    instrument_type="Derivative (Fixed Asset)",
+                    nii_contribution=abs(fixed_nii_contribution),
+                    breakdown_type=derivative.type,
+                    breakdown_value=bucket
+                ))
+                nii_driver_records.append(NiiDriverCreate(
+                    scenario=scenario_name,
+                    instrument_id=str(derivative.id) + "_floating",
+                    instrument_type="Derivative (Floating Liability)",
+                    nii_contribution=abs(floating_nii_contribution),
+                    breakdown_type=derivative.type,
+                    breakdown_value=bucket
+                ))
+            elif derivative.subtype == "Payer Swap":
+                # Fixed leg is liability, floating leg is asset
+                nii_driver_records.append(NiiDriverCreate(
+                    scenario=scenario_name,
+                    instrument_id=str(derivative.id) + "_fixed",
+                    instrument_type="Derivative (Fixed Liability)",
+                    nii_contribution=abs(fixed_nii_contribution),
+                    breakdown_type=derivative.type,
+                    breakdown_value=bucket
+                ))
+                nii_driver_records.append(NiiDriverCreate(
+                    scenario=scenario_name,
+                    instrument_id=str(derivative.id) + "_floating",
+                    instrument_type="Derivative (Floating Asset)",
+                    nii_contribution=abs(floating_nii_contribution),
+                    breakdown_type=derivative.type,
+                    breakdown_value=bucket
+                ))
+            else:
+                # For other derivative types, treat as single net position
+                net_nii_contribution = fixed_nii_contribution - floating_nii_contribution
+                nii_driver_records.append(NiiDriverCreate(
+                    scenario=scenario_name,
+                    instrument_id=str(derivative.id),
+                    instrument_type=derivative.type,
+                    nii_contribution=abs(net_nii_contribution),
+                    breakdown_type=derivative.type,
+                    breakdown_value=bucket
+                ))
     
     # Delete and save NII drivers for all scenarios
     db.query(NiiDriver).delete(synchronize_session=False)
@@ -991,21 +1054,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
 
 
 
-    # Populate repricing_net_positions
-    net_positions = []
-    for bucket in gap_analysis_metrics["nii_repricing_gap"]:
-        net_positions.append(RepricingNetPositionCreate(
-            scenario="Base Case",
-            bucket=bucket.bucket,
-            total_assets=bucket.assets,
-            total_liabilities=bucket.liabilities,
-            net_position=bucket.gap,
-            nii_base=base_case_nii,
-            nii_shocked=nii_up_200bps if nii_up_200bps else base_case_nii
-        ))
-    # Delete and save net positions
-    db.query(RepricingNetPosition).filter(RepricingNetPosition.scenario == "Base Case").delete(synchronize_session=False)
-    save_repricing_net_positions(db, net_positions)
+
 
     # Populate repricing_buckets for all instruments (for drill-down capability)
     repricing_buckets = []
@@ -1027,7 +1076,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             repricing_buckets.append(RepricingBucketCreate(
                 scenario="Base Case",
                 bucket=bucket_name,
-                instrument_type="Loan",
+                instrument_type=loan.type,
                 instrument_id=str(loan.id),
                 notional=loan.notional,
                 position="asset"
@@ -1037,7 +1086,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             repricing_buckets.append(RepricingBucketCreate(
                 scenario="Base Case",
                 bucket=bucket_name,
-                instrument_type="Loan",
+                instrument_type=loan.type,
                 instrument_id=str(loan.id),
                 notional=loan.notional,
                 position="asset"
@@ -1050,7 +1099,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 repricing_buckets.append(RepricingBucketCreate(
                     scenario="Base Case",
                     bucket=bucket_name,
-                    instrument_type="Loan",
+                    instrument_type=loan.type,
                     instrument_id=str(loan.id),
                     notional=loan.notional,
                     position="asset"
@@ -1079,7 +1128,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             repricing_buckets.append(RepricingBucketCreate(
                 scenario="Base Case",
                 bucket=bucket_name,
-                instrument_type="Deposit",
+                instrument_type=deposit.type,
                 instrument_id=str(deposit.id),
                 notional=deposit.balance,
                 position="liability"
@@ -1095,7 +1144,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                     repricing_buckets.append(RepricingBucketCreate(
                         scenario="Base Case",
                         bucket=bucket_name,
-                        instrument_type="Deposit",
+                        instrument_type=deposit.type,
                         instrument_id=str(deposit.id),
                         notional=deposit.balance,
                         position="liability"
@@ -1116,7 +1165,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 repricing_buckets.append(RepricingBucketCreate(
                     scenario="Base Case",
                     bucket=bucket_name,
-                    instrument_type="Deposit",
+                    instrument_type=deposit.type,
                     instrument_id=str(deposit.id),
                     notional=deposit.balance,
                     position="liability"
@@ -1126,7 +1175,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             repricing_buckets.append(RepricingBucketCreate(
                 scenario="Base Case",
                 bucket=bucket_name,
-                instrument_type="Deposit",
+                instrument_type=deposit.type,
                 instrument_id=str(deposit.id),
                 notional=deposit.balance,
                 position="liability"

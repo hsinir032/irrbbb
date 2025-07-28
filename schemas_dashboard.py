@@ -30,14 +30,7 @@ class RepricingBucketCreate(BaseModel):
     notional: float
     position: str  # asset or liability
 
-class RepricingNetPositionCreate(BaseModel):
-    scenario: str
-    bucket: str
-    total_assets: float
-    total_liabilities: float
-    net_position: float
-    nii_base: float
-    nii_shocked: float
+
 
 class PortfolioCompositionCreate(BaseModel):
     timestamp: date

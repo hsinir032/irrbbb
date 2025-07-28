@@ -21,8 +21,7 @@ import schemas_dashboard
 from calculations import generate_dashboard_data_from_db
 from fastapi import Query
 from typing import List
-from models_dashboard import CashflowLadder
-from models_dashboard import RepricingBucket
+from models_dashboard import CashflowLadder, RepricingBucket
 
 # --- FastAPI App Initialization ---
 app = FastAPI(
@@ -184,7 +183,6 @@ async def root():
 from crud_dashboard import (
     get_latest_dashboard_metrics,
     get_eve_drivers_for_scenario,
-    get_net_positions_for_scenario,
     get_bucket_constituents,
     get_portfolio_composition,
     get_nii_drivers_for_scenario_and_breakdown,
@@ -218,10 +216,7 @@ def get_eve_drivers(
     else:
         return get_eve_drivers_for_scenario(db, "Parallel Up +200bps")
 
-@app.get("/api/v1/dashboard/net-positions")
-def get_net_positions(scenario: str = "Base Case", db: Session = Depends(get_db)):
-    """Returns net asset/liability positions across repricing buckets."""
-    return get_net_positions_for_scenario(db, scenario)
+
 
 @app.get("/api/v1/dashboard/bucket-constituents")
 def get_bucket_instruments(scenario: str, bucket: str, db: Session = Depends(get_db)):
@@ -321,7 +316,7 @@ def get_cashflow_ladder_instrument_types(db: Session = Depends(get_db)):
 
 @app.get("/api/v1/repricing-gap")
 def get_repricing_gap(scenario: str = "Base Case", db: Session = Depends(get_db)):
-    """Returns repricing gap data for the bar chart - top level view with assets, liabilities, and net by bucket."""
+    """Returns repricing gap data for the bar chart - aggregated from detailed instrument data."""
     # Get all repricing bucket records for the scenario
     records = db.query(RepricingBucket).filter(RepricingBucket.scenario == scenario).all()
     

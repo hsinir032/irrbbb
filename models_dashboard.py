@@ -36,16 +36,7 @@ class RepricingBucket(Base):
     notional = Column(Float)
     position = Column(String)  # asset / liability
 
-class RepricingNetPosition(Base):
-    __tablename__ = "repricing_net_positions"
-    id = Column(Integer, primary_key=True, index=True)
-    scenario = Column(String)
-    bucket = Column(String)
-    total_assets = Column(Float)
-    total_liabilities = Column(Float)
-    net_position = Column(Float)
-    nii_base = Column(Float)
-    nii_shocked = Column(Float)
+
 
 class PortfolioComposition(Base):
     __tablename__ = "portfolio_composition"
