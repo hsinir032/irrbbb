@@ -260,53 +260,26 @@ def generate_deposit_cashflows(deposit: models.Deposit, yield_curve: Dict[str, f
     return []
 
 
-def calculate_derivative_pv(derivative: models.Derivative, yield_curve: Dict[str, float], today: date) -> float:
-    """
-    Calculates the present value of a derivative (interest rate swap).
-    For swaps, PV = (Fixed Rate - Floating Rate) * Notional * Remaining Term
-    """
-    if derivative.start_date > today or derivative.end_date <= today:
-        return 0.0  # Swap hasn't started or has ended
-    
-    # Calculate remaining term in years
-    remaining_days = (derivative.end_date - today).days
-    remaining_years = remaining_days / 365.0
-    
-    if remaining_years <= 0:
-        return 0.0
-    
-    # Get current floating rate (interpolated from yield curve)
-    current_floating_rate_for_valuation = interpolate_rate(yield_curve, remaining_days) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
-    
-    # Calculate net annual payment
-    fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
-    if derivative.subtype == "Payer Swap":
-        net_annual_payment = (current_floating_rate_for_valuation - fixed_rate) * derivative.notional
-    elif derivative.subtype == "Receiver Swap":
-        net_annual_payment = (fixed_rate - current_floating_rate_for_valuation) * derivative.notional
-    else:
-        return 0.0  # Unknown swap type
-    
-    # Calculate PV using simple discounting
-    discount_rate = interpolate_rate(yield_curve, remaining_days)
-    discount_factor = 1 / (1 + discount_rate * remaining_years)
-    pv = net_annual_payment * remaining_years * discount_factor
-    
-    return pv
+
 
 def generate_derivative_cashflows(derivative: models.Derivative, yield_curve: Dict[str, float], today: date) -> List[Tuple[date, float]]:
     """
     Generates projected cash flows for a derivative (interest rate swap).
     Returns a list of (date, amount) tuples.
     """
-    if derivative.start_date > today or derivative.end_date <= today:
+    if derivative.start_date > today or derivative.end_date < today:
         return []  # Swap hasn't started or has ended
     
     cashflows = []
     fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
     
     # Generate cash flows for each payment period
+    # Start from the next payment date after today
     payment_date = derivative.start_date
+    # If the start date is in the past, find the next payment date
+    while payment_date <= today:
+        payment_date += timedelta(days=365)  # Move to next year
+    
     while payment_date <= derivative.end_date and payment_date > today:
         # Calculate floating rate for this period
         days_to_payment = (payment_date - today).days
@@ -438,22 +411,22 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
 
     print('--- EVE Derivative PVs (All Derivatives) ---')
     for derivative in derivatives:
-        pv = calculate_derivative_pv(derivative, yield_curve, today)
-        print(f"Derivative {derivative.instrument_id} ({derivative.subtype}): PV = {pv:,.2f}")
+        fixed_pv = calculate_fixed_leg_pv(derivative, yield_curve, today)
+        floating_pv = calculate_floating_leg_pv(derivative, yield_curve, today)
+        net_pv = fixed_pv - floating_pv  # Fixed leg - Floating leg
+        print(f"Derivative {derivative.instrument_id} ({derivative.subtype}): Fixed PV = {fixed_pv:,.2f}, Floating PV = {floating_pv:,.2f}, Net PV = {net_pv:,.2f}")
         # For EVE, we add the PV to the appropriate side based on swap type
         if derivative.subtype == "Receiver Swap":
             # Receiver Swap: We receive fixed (asset), pay floating (liability)
-            # Net PV is positive if fixed rate > floating rate
-            total_pv_assets += pv if pv > 0 else 0
-            total_pv_liabilities += abs(pv) if pv < 0 else 0
+            total_pv_assets += fixed_pv
+            total_pv_liabilities += floating_pv
         elif derivative.subtype == "Payer Swap":
             # Payer Swap: We pay fixed (liability), receive floating (asset)
-            # Net PV is negative if fixed rate > floating rate
-            total_pv_assets += pv if pv > 0 else 0
-            total_pv_liabilities += abs(pv) if pv < 0 else 0
+            total_pv_assets += floating_pv
+            total_pv_liabilities += fixed_pv
         else:
             # For other swap types, treat as net position
-            total_pv_derivatives += pv
+            total_pv_derivatives += net_pv
 
     eve_value = total_pv_assets - abs(total_pv_liabilities) + total_pv_derivatives
 
@@ -837,28 +810,21 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 duration=duration
             ))
         for derivative in derivatives:
-            # Generate cash flows for duration calculation only
-            derivative_cfs = generate_derivative_cashflows(derivative, curve, today)
+            # Skip inactive derivatives
+            if derivative.start_date > today or derivative.end_date < today:
+                continue
             
-            # Calculate fixed and floating components
-            fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
-            floating_rate = interpolate_rate(curve, 365) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
-            notional = derivative.notional
+            # Generate separate cashflows for fixed and floating legs for duration calculation
+            fixed_cfs = generate_fixed_leg_cashflows(derivative, curve, today)
+            floating_cfs = generate_floating_leg_cashflows(derivative, curve, today)
             
-            # Calculate fixed and floating payments
-            accrual_period = get_accrual_period(getattr(derivative, 'fixed_payment_frequency', 'Annually'))
-            fixed_payment = fixed_rate * notional * accrual_period
-            floating_payment = floating_rate * notional * accrual_period
+            # Calculate PV of each leg using separate functions
+            fixed_pv = calculate_fixed_leg_pv(derivative, curve, today)
+            floating_pv = calculate_floating_leg_pv(derivative, curve, today)
             
-            # Calculate PV of each component
-            discount_rate = interpolate_rate(curve, 365)
-            discount_factor = 1 / (1 + discount_rate * 1)  # 1 year horizon
-            fixed_pv = fixed_payment * discount_factor
-            floating_pv = floating_payment * discount_factor
-            
-            # Calculate duration for each leg
-            fixed_duration = calculate_modified_duration(derivative_cfs, curve, today)
-            floating_duration = calculate_modified_duration(derivative_cfs, curve, today)
+            # Calculate duration for each leg using separate cashflows
+            fixed_duration = calculate_modified_duration(fixed_cfs, curve, today) if fixed_cfs else None
+            floating_duration = calculate_modified_duration(floating_cfs, curve, today) if floating_cfs else None
             
             # Create separate records for fixed and floating legs
             if derivative.subtype == "Receiver Swap":
@@ -899,13 +865,15 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 ))
             else:
                 # For other derivative types, treat as single net position
-                base_pv = calculate_derivative_pv(derivative, curve, today)
+                fixed_pv = calculate_fixed_leg_pv(derivative, curve, today)
+                floating_pv = calculate_floating_leg_pv(derivative, curve, today)
+                net_pv = fixed_pv - floating_pv
                 duration = calculate_modified_duration(derivative_cfs, curve, today)
                 eve_driver_records.append(EveDriverCreate(
                     scenario=scenario_name,
                     instrument_id=str(derivative.id),
                     instrument_type=derivative.type,
-                    base_pv=abs(base_pv),
+                    base_pv=abs(net_pv),
                     shocked_pv=None,
                     duration=duration
                 ))
@@ -1432,31 +1400,21 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                     pv=pv
                 ))
         for derivative in derivatives:
-            # Include all derivative subtypes, not just Receiver Swap
-            cfs = generate_derivative_cashflows(derivative, curve, today)
-            for cf_date, cf_amount in cfs:
+            # Generate separate cashflows for fixed and floating legs
+            fixed_cfs = generate_fixed_leg_cashflows(derivative, curve, today)
+            floating_cfs = generate_floating_leg_cashflows(derivative, curve, today)
+            
+            # Process fixed leg cashflows
+            for cf_date, cf_amount in fixed_cfs:
                 months = (cf_date.year - today.year) * 12 + (cf_date.month - today.month)
                 days_to_maturity = (cf_date - today).days
-                
-                # Calculate fixed and floating components for this payment
-                fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
-                floating_rate = interpolate_rate(curve, days_to_maturity) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
-                notional = derivative.notional
-                
-                # Get accrual period based on payment frequency
-                accrual_period = get_accrual_period(getattr(derivative, 'fixed_payment_frequency', 'Annually'))
-                
-                # Calculate fixed and floating payments
-                fixed_payment = fixed_rate * notional * accrual_period
-                floating_payment = floating_rate * notional * accrual_period
                 
                 # Calculate discount factor for this specific payment
                 discount_rate = interpolate_rate(curve, days_to_maturity)
                 discount_factor = 1 / (1 + discount_rate * (days_to_maturity / 365))
                 
-                # Calculate PV of each component
-                fixed_pv = fixed_payment * discount_factor
-                floating_pv = floating_payment * discount_factor
+                # Calculate PV of fixed component
+                fixed_pv = cf_amount * discount_factor
                 
                 # Determine asset/liability based on swap type
                 if derivative.subtype == "Receiver Swap":
@@ -1469,25 +1427,11 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                         asset_liability="A",
                         cashflow_date=cf_date,
                         time_months=months,
-                        fixed_component=fixed_payment,
+                        fixed_component=cf_amount,
                         floating_component=0.0,
-                        total_cashflow=fixed_payment,
+                        total_cashflow=cf_amount,
                         discount_factor=discount_factor,
                         pv=fixed_pv
-                    ))
-                    # Liability (Floating)
-                    cashflow_ladder_records.append(CashflowLadderCreate(
-                        scenario=scenario_name,
-                        instrument_id=str(derivative.id) + "_floating",
-                        instrument_type=derivative.type + " (Floating)",
-                        asset_liability="L",
-                        cashflow_date=cf_date,
-                        time_months=months,
-                        fixed_component=0.0,
-                        floating_component=floating_payment,
-                        total_cashflow=floating_payment,
-                        discount_factor=discount_factor,
-                        pv=floating_pv
                     ))
                 elif derivative.subtype == "Payer Swap":
                     # Fixed leg is liability, floating leg is asset
@@ -1499,12 +1443,59 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                         asset_liability="L",
                         cashflow_date=cf_date,
                         time_months=months,
-                        fixed_component=fixed_payment,
+                        fixed_component=cf_amount,
                         floating_component=0.0,
-                        total_cashflow=fixed_payment,
+                        total_cashflow=cf_amount,
                         discount_factor=discount_factor,
                         pv=fixed_pv
                     ))
+                else:
+                    # For other derivative types, treat as single net position
+                    cashflow_ladder_records.append(CashflowLadderCreate(
+                        scenario=scenario_name,
+                        instrument_id=str(derivative.id),
+                        instrument_type=derivative.type,
+                        asset_liability="A",  # Default to asset
+                        cashflow_date=cf_date,
+                        time_months=months,
+                        fixed_component=cf_amount,
+                        floating_component=0.0,
+                        total_cashflow=cf_amount,
+                        discount_factor=discount_factor,
+                        pv=fixed_pv
+                    ))
+            
+            # Process floating leg cashflows
+            for cf_date, cf_amount in floating_cfs:
+                months = (cf_date.year - today.year) * 12 + (cf_date.month - today.month)
+                days_to_maturity = (cf_date - today).days
+                
+                # Calculate discount factor for this specific payment
+                discount_rate = interpolate_rate(curve, days_to_maturity)
+                discount_factor = 1 / (1 + discount_rate * (days_to_maturity / 365))
+                
+                # Calculate PV of floating component
+                floating_pv = cf_amount * discount_factor
+                
+                # Determine asset/liability based on swap type
+                if derivative.subtype == "Receiver Swap":
+                    # Fixed leg is asset, floating leg is liability
+                    # Liability (Floating)
+                    cashflow_ladder_records.append(CashflowLadderCreate(
+                        scenario=scenario_name,
+                        instrument_id=str(derivative.id) + "_floating",
+                        instrument_type=derivative.type + " (Floating)",
+                        asset_liability="L",
+                        cashflow_date=cf_date,
+                        time_months=months,
+                        fixed_component=0.0,
+                        floating_component=cf_amount,
+                        total_cashflow=cf_amount,
+                        discount_factor=discount_factor,
+                        pv=floating_pv
+                    ))
+                elif derivative.subtype == "Payer Swap":
+                    # Fixed leg is liability, floating leg is asset
                     # Asset (Floating)
                     cashflow_ladder_records.append(CashflowLadderCreate(
                         scenario=scenario_name,
@@ -1514,8 +1505,8 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                         cashflow_date=cf_date,
                         time_months=months,
                         fixed_component=0.0,
-                        floating_component=floating_payment,
-                        total_cashflow=floating_payment,
+                        floating_component=cf_amount,
+                        total_cashflow=cf_amount,
                         discount_factor=discount_factor,
                         pv=floating_pv
                     ))
@@ -1532,7 +1523,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                         floating_component=cf_amount,
                         total_cashflow=cf_amount,
                         discount_factor=discount_factor,
-                        pv=cf_amount * discount_factor
+                        pv=floating_pv
                     ))
     save_cashflow_ladder(db, cashflow_ladder_records)
 
@@ -1591,3 +1582,63 @@ def get_accrual_period(payment_frequency: str) -> float:
     elif payment_frequency == "Annually":
         return 1.0
     return 1.0  # Default to annual if missing
+
+def generate_fixed_leg_cashflows(derivative: models.Derivative, yield_curve: Dict[str, float], today: date) -> List[Tuple[date, float]]:
+    """Generate cashflows for the fixed leg of a derivative."""
+    if derivative.fixed_rate is None:
+        return []
+    
+    cashflows = []
+    payment_date = derivative.start_date
+    
+    # If the start date is in the past, find the next payment date
+    while payment_date <= today:
+        payment_date += timedelta(days=365)  # Move to next year
+    
+    accrual_period = get_accrual_period(getattr(derivative, 'fixed_payment_frequency', 'Annually'))
+    fixed_payment = derivative.fixed_rate * derivative.notional * accrual_period
+    
+    while payment_date <= derivative.end_date:
+        cashflows.append((payment_date, fixed_payment))
+        payment_date += timedelta(days=365)
+    
+    return cashflows
+
+def generate_floating_leg_cashflows(derivative: models.Derivative, yield_curve: Dict[str, float], today: date) -> List[Tuple[date, float]]:
+    """Generate cashflows for the floating leg of a derivative."""
+    cashflows = []
+    payment_date = derivative.start_date
+    
+    # If the start date is in the past, find the next payment date
+    while payment_date <= today:
+        payment_date += timedelta(days=365)  # Move to next year
+    
+    accrual_period = get_accrual_period(getattr(derivative, 'floating_payment_frequency', 'Annually'))
+    
+    while payment_date <= derivative.end_date:
+        days_to_payment = (payment_date - today).days
+        if days_to_payment <= 0:
+            payment_date += timedelta(days=365)
+            continue
+        
+        # Calculate floating rate at payment date
+        floating_rate = interpolate_rate(yield_curve, days_to_payment) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
+        floating_payment = floating_rate * derivative.notional * accrual_period
+        
+        cashflows.append((payment_date, floating_payment))
+        payment_date += timedelta(days=365)
+    
+    return cashflows
+
+def calculate_fixed_leg_pv(derivative: models.Derivative, yield_curve: Dict[str, float], today: date) -> float:
+    """Calculate PV of the fixed leg of a derivative."""
+    if derivative.fixed_rate is None:
+        return 0.0
+    
+    fixed_cfs = generate_fixed_leg_cashflows(derivative, yield_curve, today)
+    return calculate_pv_of_cashflows(fixed_cfs, yield_curve, today)
+
+def calculate_floating_leg_pv(derivative: models.Derivative, yield_curve: Dict[str, float], today: date) -> float:
+    """Calculate PV of the floating leg of a derivative."""
+    floating_cfs = generate_floating_leg_cashflows(derivative, yield_curve, today)
+    return calculate_pv_of_cashflows(floating_cfs, yield_curve, today)

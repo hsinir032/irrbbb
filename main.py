@@ -387,6 +387,25 @@ def get_repricing_gap_drill_down(bucket: str, scenario: str = "Base Case", db: S
     
     return drill_down
 
+@app.get("/api/v1/debug/derivatives")
+def get_debug_derivatives(db: Session = Depends(get_db)):
+    """Debug endpoint to check what derivatives exist in the database."""
+    from models import Derivative
+    derivatives = db.query(Derivative).all()
+    result = []
+    for derivative in derivatives:
+        result.append({
+            "instrument_id": derivative.instrument_id,
+            "type": derivative.type,
+            "subtype": derivative.subtype,
+            "start_date": derivative.start_date,
+            "end_date": derivative.end_date,
+            "notional": derivative.notional,
+            "fixed_rate": derivative.fixed_rate,
+            "floating_spread": derivative.floating_spread
+        })
+    return result
+
 # --- Create missing dashboard tables (only runs once) ---
 try:
     from models_dashboard import Base as DashboardBase
