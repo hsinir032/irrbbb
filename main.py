@@ -22,6 +22,7 @@ from calculations import generate_dashboard_data_from_db
 from fastapi import Query
 from typing import List
 from models_dashboard import CashflowLadder
+from models_dashboard import RepricingBucket
 
 # --- FastAPI App Initialization ---
 app = FastAPI(
@@ -317,6 +318,79 @@ def get_cashflow_ladder(
 def get_cashflow_ladder_instrument_types(db: Session = Depends(get_db)):
     types = db.query(CashflowLadder.instrument_type).distinct().all()
     return [t[0] for t in types if t[0]]
+
+@app.get("/api/v1/repricing-gap")
+def get_repricing_gap(scenario: str = "Base Case", db: Session = Depends(get_db)):
+    """Returns repricing gap data for the bar chart - top level view with assets, liabilities, and net by bucket."""
+    # Get all repricing bucket records for the scenario
+    records = db.query(RepricingBucket).filter(RepricingBucket.scenario == scenario).all()
+    
+    # Group by bucket and calculate totals
+    buckets = {}
+    for record in records:
+        if record.bucket not in buckets:
+            buckets[record.bucket] = {
+                "bucket": record.bucket,
+                "assets": 0.0,
+                "liabilities": 0.0,
+                "net": 0.0,
+                "instruments": []
+            }
+        
+        # Add to totals
+        if record.position == "asset":
+            buckets[record.bucket]["assets"] += record.notional
+        else:
+            buckets[record.bucket]["liabilities"] += record.notional
+        
+        # Add instrument detail
+        buckets[record.bucket]["instruments"].append({
+            "instrument_id": record.instrument_id,
+            "instrument_type": record.instrument_type,
+            "position": record.position,
+            "amount": record.notional
+        })
+    
+    # Calculate net for each bucket
+    for bucket_data in buckets.values():
+        bucket_data["net"] = bucket_data["assets"] - bucket_data["liabilities"]
+    
+    # Return sorted by bucket order
+    bucket_order = ["0-3 Months", "3-6 Months", "6-12 Months", "1-5 Years", ">5 Years", "Fixed Rate / Non-Sensitive"]
+    return [buckets.get(bucket, {"bucket": bucket, "assets": 0.0, "liabilities": 0.0, "net": 0.0, "instruments": []}) 
+            for bucket in bucket_order if bucket in buckets]
+
+@app.get("/api/v1/repricing-gap/drill-down/{bucket}")
+def get_repricing_gap_drill_down(bucket: str, scenario: str = "Base Case", db: Session = Depends(get_db)):
+    """Returns instrument-level drill-down data for a specific bucket."""
+    records = db.query(RepricingBucket).filter(
+        RepricingBucket.scenario == scenario,
+        RepricingBucket.bucket == bucket
+    ).all()
+    
+    # Group by instrument type and position
+    drill_down = {
+        "assets": [],
+        "liabilities": []
+    }
+    
+    for record in records:
+        instrument_data = {
+            "instrument_id": record.instrument_id,
+            "instrument_type": record.instrument_type,
+            "amount": record.notional
+        }
+        
+        if record.position == "asset":
+            drill_down["assets"].append(instrument_data)
+        else:
+            drill_down["liabilities"].append(instrument_data)
+    
+    # Sort by amount (descending)
+    drill_down["assets"].sort(key=lambda x: x["amount"], reverse=True)
+    drill_down["liabilities"].sort(key=lambda x: x["amount"], reverse=True)
+    
+    return drill_down
 
 # --- Create missing dashboard tables (only runs once) ---
 try:

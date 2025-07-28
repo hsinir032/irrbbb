@@ -12,7 +12,7 @@ import schemas
 from crud_dashboard import *
 from schemas_dashboard import *
 from models_dashboard import NiiDriver, EveDriver, RepricingBucket, RepricingNetPosition, PortfolioComposition, YieldCurve, CashflowLadder
-from schemas_dashboard import CashflowLadderCreate
+from schemas_dashboard import CashflowLadderCreate, RepricingBucketCreate
 
 # In-memory store for scenario history (for demonstration)
 _scenario_history: List[Dict[str, Any]] = []
@@ -403,7 +403,11 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
 
             if (derivative.end_date - today).days > 0:
                 proration_factor = min(1.0, (min(derivative.end_date, nii_horizon_date) - today).days / 365.0)
-                total_nii_income += net_annual_interest * proration_factor
+                # For NII, we add to income if positive (asset), to expense if negative (liability)
+                if net_annual_interest > 0:
+                    total_nii_income += net_annual_interest * proration_factor
+                else:
+                    total_nii_expense += abs(net_annual_interest) * proration_factor
 
     net_interest_income = total_nii_income - total_nii_expense
 
@@ -432,13 +436,24 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
         print(f"Deposit {deposit.instrument_id} ({deposit.type}): PV = {pv:,.2f}")
         total_pv_liabilities += pv
 
-    print('--- EVE Derivative PVs (Receiver Swaps) ---')
+    print('--- EVE Derivative PVs (All Derivatives) ---')
     for derivative in derivatives:
-        if getattr(derivative, 'subtype', None) != "Receiver Swap":
-            continue
         pv = calculate_derivative_pv(derivative, yield_curve, today)
-        print(f"Derivative {derivative.instrument_id} (Receiver Swap): PV = {pv:,.2f}")
-        total_pv_derivatives += pv
+        print(f"Derivative {derivative.instrument_id} ({derivative.subtype}): PV = {pv:,.2f}")
+        # For EVE, we add the PV to the appropriate side based on swap type
+        if derivative.subtype == "Receiver Swap":
+            # Receiver Swap: We receive fixed (asset), pay floating (liability)
+            # Net PV is positive if fixed rate > floating rate
+            total_pv_assets += pv if pv > 0 else 0
+            total_pv_liabilities += abs(pv) if pv < 0 else 0
+        elif derivative.subtype == "Payer Swap":
+            # Payer Swap: We pay fixed (liability), receive floating (asset)
+            # Net PV is negative if fixed rate > floating rate
+            total_pv_assets += pv if pv > 0 else 0
+            total_pv_liabilities += abs(pv) if pv < 0 else 0
+        else:
+            # For other swap types, treat as net position
+            total_pv_derivatives += pv
 
     eve_value = total_pv_assets - abs(total_pv_liabilities) + total_pv_derivatives
 
@@ -484,11 +499,27 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
             continue
         if loan.type == "HTM Securities":
             bucket_name = "Fixed Rate / Non-Sensitive"
+            nii_gap_data[bucket_name]["assets"] += loan.notional
         elif not loan.next_repricing_date:
             bucket_name = "Fixed Rate / Non-Sensitive"
+            nii_gap_data[bucket_name]["assets"] += loan.notional
         else:
-            bucket_name = get_bucket(loan.next_repricing_date, today, nii_buckets_def)
-        nii_gap_data[bucket_name]["assets"] += loan.notional
+            # For floating rate loans, include all repricing points over the life
+            current_date = loan.next_repricing_date
+            while current_date and current_date <= loan.maturity_date:
+                bucket_name = get_bucket(current_date, today, nii_buckets_def)
+                nii_gap_data[bucket_name]["assets"] += loan.notional
+                # Move to next repricing date
+                if loan.repricing_frequency == "Monthly":
+                    current_date = current_date + timedelta(days=30)
+                elif loan.repricing_frequency == "Quarterly":
+                    current_date = current_date + timedelta(days=90)
+                elif loan.repricing_frequency == "Semi-Annually":
+                    current_date = current_date + timedelta(days=182)
+                elif loan.repricing_frequency == "Annually":
+                    current_date = current_date + timedelta(days=365)
+                else:
+                    break  # Unknown frequency, stop
 
     for deposit in deposits:
         if deposit.type == "Equity":
@@ -496,35 +527,100 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
         if deposit.type in ["CD", "Wholesale Funding"]:
             if deposit.maturity_date:
                 bucket_name = get_bucket(deposit.maturity_date, today, nii_buckets_def)
+                nii_gap_data[bucket_name]["liabilities"] += deposit.balance
             else:
                 bucket_name = "Fixed Rate / Non-Sensitive"
+                nii_gap_data[bucket_name]["liabilities"] += deposit.balance
         elif deposit.type in ["Checking", "Savings"]:
             if deposit.next_repricing_date:
-                bucket_name = get_bucket(deposit.next_repricing_date, today, nii_buckets_def)
+                # For floating deposits, include all repricing points over the life
+                current_date = deposit.next_repricing_date
+                # Assume NMDs have effective maturity of 5 years for gap analysis
+                effective_maturity = today + timedelta(days=365*5)
+                while current_date and current_date <= effective_maturity:
+                    bucket_name = get_bucket(current_date, today, nii_buckets_def)
+                    nii_gap_data[bucket_name]["liabilities"] += deposit.balance
+                    # Move to next repricing date
+                    if deposit.repricing_frequency == "Monthly":
+                        current_date = current_date + timedelta(days=30)
+                    elif deposit.repricing_frequency == "Quarterly":
+                        current_date = current_date + timedelta(days=90)
+                    elif deposit.repricing_frequency == "Semi-Annually":
+                        current_date = current_date + timedelta(days=182)
+                    elif deposit.repricing_frequency == "Annually":
+                        current_date = current_date + timedelta(days=365)
+                    else:
+                        break  # Unknown frequency, stop
             else:
                 bucket_name = "Fixed Rate / Non-Sensitive"
+                nii_gap_data[bucket_name]["liabilities"] += deposit.balance
         else:
             bucket_name = "Fixed Rate / Non-Sensitive"
-        nii_gap_data[bucket_name]["liabilities"] += deposit.balance
+            nii_gap_data[bucket_name]["liabilities"] += deposit.balance
 
     for derivative in derivatives:
         if derivative.type == "Interest Rate Swap":
-            repricing_freq_days = 0
-            if derivative.floating_payment_frequency == "Monthly": repricing_freq_days = 30
-            elif derivative.floating_payment_frequency == "Quarterly": repricing_freq_days = 90
-            elif derivative.floating_payment_frequency == "Semi-Annually": repricing_freq_days = 182
-            elif derivative.floating_payment_frequency == "Annually": repricing_freq_days = 365
-
-            if repricing_freq_days > 0:
-                next_repricing_date = today + timedelta(days=repricing_freq_days)
-                bucket_name = get_bucket(next_repricing_date, today, nii_buckets_def)
-                
-                if derivative.subtype == "Payer Swap":
-                    nii_gap_data[bucket_name]["assets"] += derivative.notional
-                elif derivative.subtype == "Receiver Swap":
-                    nii_gap_data[bucket_name]["liabilities"] += derivative.notional
+            # Split derivative into fixed and floating legs
+            notional = derivative.notional
+            
+            # Fixed leg always goes in "Fixed Rate / Non-Sensitive"
+            if derivative.subtype == "Payer Swap":
+                # For Payer Swap: Fixed leg is liability
+                nii_gap_data["Fixed Rate / Non-Sensitive"]["liabilities"] += notional
+            elif derivative.subtype == "Receiver Swap":
+                # For Receiver Swap: Fixed leg is asset
+                nii_gap_data["Fixed Rate / Non-Sensitive"]["assets"] += notional
             else:
-                nii_gap_data["Fixed Rate / Non-Sensitive"]["assets"] += derivative.notional
+                # For other swap types, default to asset
+                nii_gap_data["Fixed Rate / Non-Sensitive"]["assets"] += notional
+            
+            # Floating leg goes in appropriate time bucket based on repricing frequency
+            # Include all repricing points over the life of the derivative
+            if derivative.floating_payment_frequency:
+                current_date = today
+                # Start from next repricing date
+                if derivative.floating_payment_frequency == "Monthly":
+                    current_date = today + timedelta(days=30)
+                elif derivative.floating_payment_frequency == "Quarterly":
+                    current_date = today + timedelta(days=90)
+                elif derivative.floating_payment_frequency == "Semi-Annually":
+                    current_date = today + timedelta(days=182)
+                elif derivative.floating_payment_frequency == "Annually":
+                    current_date = today + timedelta(days=365)
+                
+                # Include all repricing points until maturity
+                while current_date and current_date <= derivative.end_date:
+                    bucket_name = get_bucket(current_date, today, nii_buckets_def)
+                    
+                    if derivative.subtype == "Payer Swap":
+                        # For Payer Swap: Floating leg is asset
+                        nii_gap_data[bucket_name]["assets"] += notional
+                    elif derivative.subtype == "Receiver Swap":
+                        # For Receiver Swap: Floating leg is liability
+                        nii_gap_data[bucket_name]["liabilities"] += notional
+                    else:
+                        # For other swap types, default to asset
+                        nii_gap_data[bucket_name]["assets"] += notional
+                    
+                    # Move to next repricing date
+                    if derivative.floating_payment_frequency == "Monthly":
+                        current_date = current_date + timedelta(days=30)
+                    elif derivative.floating_payment_frequency == "Quarterly":
+                        current_date = current_date + timedelta(days=90)
+                    elif derivative.floating_payment_frequency == "Semi-Annually":
+                        current_date = current_date + timedelta(days=182)
+                    elif derivative.floating_payment_frequency == "Annually":
+                        current_date = current_date + timedelta(days=365)
+                    else:
+                        break  # Unknown frequency, stop
+            else:
+                # If no repricing frequency, put floating leg in "Fixed Rate / Non-Sensitive"
+                if derivative.subtype == "Payer Swap":
+                    nii_gap_data["Fixed Rate / Non-Sensitive"]["assets"] += notional
+                elif derivative.subtype == "Receiver Swap":
+                    nii_gap_data["Fixed Rate / Non-Sensitive"]["liabilities"] += notional
+                else:
+                    nii_gap_data["Fixed Rate / Non-Sensitive"]["assets"] += notional
 
     nii_gap_results = []
     for bucket in nii_bucket_order:
@@ -741,18 +837,35 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 duration=duration
             ))
         for derivative in derivatives:
-            if getattr(derivative, 'subtype', None) != "Receiver Swap":
-                continue
             # Use the same PV calculation method as EVE scenario table
             base_pv = calculate_derivative_pv(derivative, curve, today)
             # Generate cash flows for duration calculation only
             derivative_cfs = generate_derivative_cashflows(derivative, curve, today)
             duration = calculate_modified_duration(derivative_cfs, curve, today)
+            
+            # Determine the appropriate instrument type based on swap type and PV sign
+            if derivative.subtype == "Receiver Swap":
+                if base_pv > 0:
+                    # Positive PV: Fixed leg is asset
+                    instrument_type = "Derivative (Fixed Asset)"
+                else:
+                    # Negative PV: Floating leg is liability
+                    instrument_type = "Derivative (Floating Liability)"
+            elif derivative.subtype == "Payer Swap":
+                if base_pv > 0:
+                    # Positive PV: Floating leg is asset
+                    instrument_type = "Derivative (Floating Asset)"
+                else:
+                    # Negative PV: Fixed leg is liability
+                    instrument_type = "Derivative (Fixed Liability)"
+            else:
+                instrument_type = derivative.type
+            
             eve_driver_records.append(EveDriverCreate(
                 scenario=scenario_name,
                 instrument_id=str(derivative.id),
-                instrument_type=derivative.type,
-                base_pv=base_pv,
+                instrument_type=instrument_type,
+                base_pv=abs(base_pv),  # Store absolute value
                 shocked_pv=None,
                 duration=duration
             ))
@@ -818,8 +931,6 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         
         # Derivatives
         for derivative in derivatives:
-            if getattr(derivative, 'subtype', None) != "Receiver Swap":
-                continue
             if derivative.start_date <= today and derivative.end_date > today:
                 fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
                 floating_rate_for_nii = interpolate_rate(curve, 365) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
@@ -839,6 +950,24 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             else:
                 nii_contribution = 0
 
+            # Determine the appropriate instrument type based on swap type and NII contribution sign
+            if derivative.subtype == "Receiver Swap":
+                if nii_contribution > 0:
+                    # Positive NII: Fixed leg is asset
+                    instrument_type = "Derivative (Fixed Asset)"
+                else:
+                    # Negative NII: Floating leg is liability
+                    instrument_type = "Derivative (Floating Liability)"
+            elif derivative.subtype == "Payer Swap":
+                if nii_contribution > 0:
+                    # Positive NII: Floating leg is asset
+                    instrument_type = "Derivative (Floating Asset)"
+                else:
+                    # Negative NII: Fixed leg is liability
+                    instrument_type = "Derivative (Fixed Liability)"
+            else:
+                instrument_type = derivative.type
+
             bucket = get_bucket(derivative.end_date, today, {
                 "0-3 Months": 90,
                 "3-6 Months": 180,
@@ -850,8 +979,8 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             nii_driver_records.append(NiiDriverCreate(
                 scenario=scenario_name,
                 instrument_id=str(derivative.id),
-                instrument_type=derivative.type,
-                nii_contribution=nii_contribution,
+                instrument_type=instrument_type,
+                nii_contribution=abs(nii_contribution),  # Store absolute value
                 breakdown_type=derivative.type,
                 breakdown_value=bucket
             ))
@@ -860,87 +989,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     db.query(NiiDriver).delete(synchronize_session=False)
     save_nii_drivers(db, nii_driver_records)
 
-    # Populate repricing_buckets for all instruments
-    repricing_buckets = []
-    nii_buckets_def = {
-        "0-3 Months": 90,
-        "3-6 Months": 180,
-        "6-12 Months": 365,
-        "1-5 Years": 365 * 5,
-        ">5 Years": 365 * 100,
-        "Fixed Rate / Non-Sensitive": -1
-    }
-    # Loans (assets)
-    for loan in loans:
-        if loan.type == "Cash":
-            continue
-        if loan.type == "HTM Securities":
-            bucket_name = "Fixed Rate / Non-Sensitive"
-        else:
-            bucket_name = get_bucket(loan.next_repricing_date, today, nii_buckets_def)
-        repricing_buckets.append(RepricingBucketCreate(
-            scenario="Base Case",
-            bucket=bucket_name,
-            instrument_type="Loan",
-            instrument_id=str(loan.id),
-            notional=loan.notional,
-            position="asset"
-        ))
-    # Deposits (liabilities)
-    for deposit in deposits:
-        if deposit.type == "Equity":
-            continue
-        if deposit.type == "Wholesale Funding":
-            bucket_name = get_bucket(deposit.maturity_date, today, nii_buckets_def)
-        else:
-            bucket_name = get_bucket(deposit.next_repricing_date, today, nii_buckets_def)
-        repricing_buckets.append(RepricingBucketCreate(
-            scenario="Base Case",
-            bucket=bucket_name,
-            instrument_type="Deposit",
-            instrument_id=str(deposit.id),
-            notional=deposit.balance,
-            position="liability"
-        ))
-    # Derivatives
-    for derivative in derivatives:
-        if getattr(derivative, 'subtype', None) != "Receiver Swap":
-            continue
-        if derivative.end_date and derivative.end_date > today:
-            next_repricing_date = derivative.end_date
-        else:
-            next_repricing_date = derivative.start_date + timedelta(days=365)  # Default to 1 year
-        bucket_name = get_bucket(next_repricing_date, today, nii_buckets_def)
-        if derivative.subtype == "Payer Swap":
-            repricing_buckets.append(RepricingBucketCreate(
-                scenario="Base Case",
-                bucket=bucket_name,
-                instrument_type="Derivative",
-                instrument_id=str(derivative.id),
-                notional=derivative.notional,
-                position="asset"
-            ))
-        elif derivative.subtype == "Receiver Swap":
-            repricing_buckets.append(RepricingBucketCreate(
-                scenario="Base Case",
-                bucket=bucket_name,
-                instrument_type="Derivative",
-                instrument_id=str(derivative.id),
-                notional=derivative.notional,
-                position="liability"
-            ))
-        else:
-            repricing_buckets.append(RepricingBucketCreate(
-                scenario="Base Case",
-                bucket="Fixed Rate / Non-Sensitive",
-                instrument_type="Derivative",
-                instrument_id=str(derivative.id),
-                notional=derivative.notional,
-                position="asset"
-            ))
-    # Delete and save repricing buckets
-    db.query(RepricingBucket).filter(RepricingBucket.scenario == "Base Case").delete(synchronize_session=False)
-    save_repricing_buckets(db, repricing_buckets)
+
 
     # Populate repricing_net_positions
     net_positions = []
@@ -957,6 +1006,262 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
     # Delete and save net positions
     db.query(RepricingNetPosition).filter(RepricingNetPosition.scenario == "Base Case").delete(synchronize_session=False)
     save_repricing_net_positions(db, net_positions)
+
+    # Populate repricing_buckets for all instruments (for drill-down capability)
+    repricing_buckets = []
+    nii_buckets_def = {
+        "0-3 Months": 90,
+        "3-6 Months": 180,
+        "6-12 Months": 365,
+        "1-5 Years": 365 * 5,
+        ">5 Years": 365 * 100,
+        "Fixed Rate / Non-Sensitive": -1
+    }
+    
+    # Loans (assets)
+    for loan in loans:
+        if loan.type == "Cash":
+            continue
+        if loan.type == "HTM Securities":
+            bucket_name = "Fixed Rate / Non-Sensitive"
+            repricing_buckets.append(RepricingBucketCreate(
+                scenario="Base Case",
+                bucket=bucket_name,
+                instrument_type="Loan",
+                instrument_id=str(loan.id),
+                notional=loan.notional,
+                position="asset"
+            ))
+        elif not loan.next_repricing_date:
+            bucket_name = "Fixed Rate / Non-Sensitive"
+            repricing_buckets.append(RepricingBucketCreate(
+                scenario="Base Case",
+                bucket=bucket_name,
+                instrument_type="Loan",
+                instrument_id=str(loan.id),
+                notional=loan.notional,
+                position="asset"
+            ))
+        else:
+            # For floating rate loans, include all repricing points over the life
+            current_date = loan.next_repricing_date
+            while current_date and current_date <= loan.maturity_date:
+                bucket_name = get_bucket(current_date, today, nii_buckets_def)
+                repricing_buckets.append(RepricingBucketCreate(
+                    scenario="Base Case",
+                    bucket=bucket_name,
+                    instrument_type="Loan",
+                    instrument_id=str(loan.id),
+                    notional=loan.notional,
+                    position="asset"
+                ))
+                # Move to next repricing date
+                if loan.repricing_frequency == "Monthly":
+                    current_date = current_date + timedelta(days=30)
+                elif loan.repricing_frequency == "Quarterly":
+                    current_date = current_date + timedelta(days=90)
+                elif loan.repricing_frequency == "Semi-Annually":
+                    current_date = current_date + timedelta(days=182)
+                elif loan.repricing_frequency == "Annually":
+                    current_date = current_date + timedelta(days=365)
+                else:
+                    break  # Unknown frequency, stop
+    
+    # Deposits (liabilities)
+    for deposit in deposits:
+        if deposit.type == "Equity":
+            continue
+        if deposit.type in ["CD", "Wholesale Funding"]:
+            if deposit.maturity_date:
+                bucket_name = get_bucket(deposit.maturity_date, today, nii_buckets_def)
+            else:
+                bucket_name = "Fixed Rate / Non-Sensitive"
+            repricing_buckets.append(RepricingBucketCreate(
+                scenario="Base Case",
+                bucket=bucket_name,
+                instrument_type="Deposit",
+                instrument_id=str(deposit.id),
+                notional=deposit.balance,
+                position="liability"
+            ))
+        elif deposit.type in ["Checking", "Savings"]:
+            if deposit.next_repricing_date:
+                # For floating deposits, include all repricing points over the life
+                current_date = deposit.next_repricing_date
+                # Assume NMDs have effective maturity of 5 years for gap analysis
+                effective_maturity = today + timedelta(days=365*5)
+                while current_date and current_date <= effective_maturity:
+                    bucket_name = get_bucket(current_date, today, nii_buckets_def)
+                    repricing_buckets.append(RepricingBucketCreate(
+                        scenario="Base Case",
+                        bucket=bucket_name,
+                        instrument_type="Deposit",
+                        instrument_id=str(deposit.id),
+                        notional=deposit.balance,
+                        position="liability"
+                    ))
+                    # Move to next repricing date
+                    if deposit.repricing_frequency == "Monthly":
+                        current_date = current_date + timedelta(days=30)
+                    elif deposit.repricing_frequency == "Quarterly":
+                        current_date = current_date + timedelta(days=90)
+                    elif deposit.repricing_frequency == "Semi-Annually":
+                        current_date = current_date + timedelta(days=182)
+                    elif deposit.repricing_frequency == "Annually":
+                        current_date = current_date + timedelta(days=365)
+                    else:
+                        break  # Unknown frequency, stop
+            else:
+                bucket_name = "Fixed Rate / Non-Sensitive"
+                repricing_buckets.append(RepricingBucketCreate(
+                    scenario="Base Case",
+                    bucket=bucket_name,
+                    instrument_type="Deposit",
+                    instrument_id=str(deposit.id),
+                    notional=deposit.balance,
+                    position="liability"
+                ))
+        else:
+            bucket_name = "Fixed Rate / Non-Sensitive"
+            repricing_buckets.append(RepricingBucketCreate(
+                scenario="Base Case",
+                bucket=bucket_name,
+                instrument_type="Deposit",
+                instrument_id=str(deposit.id),
+                notional=deposit.balance,
+                position="liability"
+            ))
+    
+    # Derivatives
+    for derivative in derivatives:
+        if derivative.type == "Interest Rate Swap":
+            notional = derivative.notional
+            
+            # Fixed leg always goes in "Fixed Rate / Non-Sensitive"
+            if derivative.subtype == "Payer Swap":
+                # For Payer Swap: Fixed leg is liability
+                repricing_buckets.append(RepricingBucketCreate(
+                    scenario="Base Case",
+                    bucket="Fixed Rate / Non-Sensitive",
+                    instrument_type="Derivative (Fixed)",
+                    instrument_id=str(derivative.id) + "_fixed",
+                    notional=notional,
+                    position="liability"
+                ))
+            elif derivative.subtype == "Receiver Swap":
+                # For Receiver Swap: Fixed leg is asset
+                repricing_buckets.append(RepricingBucketCreate(
+                    scenario="Base Case",
+                    bucket="Fixed Rate / Non-Sensitive",
+                    instrument_type="Derivative (Fixed)",
+                    instrument_id=str(derivative.id) + "_fixed",
+                    notional=notional,
+                    position="asset"
+                ))
+            else:
+                # For other swap types, default to asset
+                repricing_buckets.append(RepricingBucketCreate(
+                    scenario="Base Case",
+                    bucket="Fixed Rate / Non-Sensitive",
+                    instrument_type="Derivative (Fixed)",
+                    instrument_id=str(derivative.id) + "_fixed",
+                    notional=notional,
+                    position="asset"
+                ))
+            
+            # Floating leg goes in appropriate time bucket based on repricing frequency
+            # Include all repricing points over the life of the derivative
+            if derivative.floating_payment_frequency:
+                current_date = today
+                # Start from next repricing date
+                if derivative.floating_payment_frequency == "Monthly":
+                    current_date = today + timedelta(days=30)
+                elif derivative.floating_payment_frequency == "Quarterly":
+                    current_date = today + timedelta(days=90)
+                elif derivative.floating_payment_frequency == "Semi-Annually":
+                    current_date = today + timedelta(days=182)
+                elif derivative.floating_payment_frequency == "Annually":
+                    current_date = today + timedelta(days=365)
+                
+                # Include all repricing points until maturity
+                while current_date and current_date <= derivative.end_date:
+                    bucket_name = get_bucket(current_date, today, nii_buckets_def)
+                    
+                    if derivative.subtype == "Payer Swap":
+                        # For Payer Swap: Floating leg is asset
+                        repricing_buckets.append(RepricingBucketCreate(
+                            scenario="Base Case",
+                            bucket=bucket_name,
+                            instrument_type="Derivative (Floating)",
+                            instrument_id=str(derivative.id) + "_floating",
+                            notional=notional,
+                            position="asset"
+                        ))
+                    elif derivative.subtype == "Receiver Swap":
+                        # For Receiver Swap: Floating leg is liability
+                        repricing_buckets.append(RepricingBucketCreate(
+                            scenario="Base Case",
+                            bucket=bucket_name,
+                            instrument_type="Derivative (Floating)",
+                            instrument_id=str(derivative.id) + "_floating",
+                            notional=notional,
+                            position="liability"
+                        ))
+                    else:
+                        # For other swap types, default to asset
+                        repricing_buckets.append(RepricingBucketCreate(
+                            scenario="Base Case",
+                            bucket=bucket_name,
+                            instrument_type="Derivative (Floating)",
+                            instrument_id=str(derivative.id) + "_floating",
+                            notional=notional,
+                            position="asset"
+                        ))
+                    
+                    # Move to next repricing date
+                    if derivative.floating_payment_frequency == "Monthly":
+                        current_date = current_date + timedelta(days=30)
+                    elif derivative.floating_payment_frequency == "Quarterly":
+                        current_date = current_date + timedelta(days=90)
+                    elif derivative.floating_payment_frequency == "Semi-Annually":
+                        current_date = current_date + timedelta(days=182)
+                    elif derivative.floating_payment_frequency == "Annually":
+                        current_date = current_date + timedelta(days=365)
+                    else:
+                        break  # Unknown frequency, stop
+            else:
+                # If no repricing frequency, put floating leg in "Fixed Rate / Non-Sensitive"
+                if derivative.subtype == "Payer Swap":
+                    repricing_buckets.append(RepricingBucketCreate(
+                        scenario="Base Case",
+                        bucket="Fixed Rate / Non-Sensitive",
+                        instrument_type="Derivative (Floating)",
+                        instrument_id=str(derivative.id) + "_floating",
+                        notional=notional,
+                        position="asset"
+                    ))
+                elif derivative.subtype == "Receiver Swap":
+                    repricing_buckets.append(RepricingBucketCreate(
+                        scenario="Base Case",
+                        bucket="Fixed Rate / Non-Sensitive",
+                        instrument_type="Derivative (Floating)",
+                        instrument_id=str(derivative.id) + "_floating",
+                        notional=notional,
+                        position="liability"
+                    ))
+                else:
+                    repricing_buckets.append(RepricingBucketCreate(
+                        scenario="Base Case",
+                        bucket="Fixed Rate / Non-Sensitive",
+                        instrument_type="Derivative (Floating)",
+                        instrument_id=str(derivative.id) + "_floating",
+                        notional=notional,
+                        position="asset"
+                    ))
+    
+    # Delete and save repricing buckets
+    db.query(RepricingBucket).filter(RepricingBucket.scenario == "Base Case").delete(synchronize_session=False)
+    save_repricing_buckets(db, repricing_buckets)
 
     # --- Save Portfolio Composition ---
     portfolio_records = []
@@ -988,13 +1293,11 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         ))
     # Derivatives
     for derivative in derivatives:
-        if getattr(derivative, 'subtype', None) != "Receiver Swap":
-            continue
         portfolio_records.append(PortfolioCompositionCreate(
             timestamp=today,
             instrument_type="Derivative",
             category=derivative.type,
-            subcategory="Receiver Swap",
+            subcategory=derivative.subtype,
             volume_count=1,
             total_amount=derivative.notional,
             average_interest_rate=derivative.fixed_rate
@@ -1080,32 +1383,108 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                     pv=pv
                 ))
         for derivative in derivatives:
-            if getattr(derivative, 'subtype', None) != "Receiver Swap":
-                continue
+            # Include all derivative subtypes, not just Receiver Swap
             cfs = generate_derivative_cashflows(derivative, curve, today)
             for cf_date, cf_amount in cfs:
                 months = (cf_date.year - today.year) * 12 + (cf_date.month - today.month)
                 days_to_maturity = (cf_date - today).days
-                # For swaps, split into fixed/floating if possible (simplified: all to floating)
-                fixed_component = 0.0
-                floating_component = cf_amount
-                total_cashflow = fixed_component + floating_component
+                
+                # Calculate fixed and floating components for this payment
+                fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
+                floating_rate = interpolate_rate(curve, days_to_maturity) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
+                notional = derivative.notional
+                
+                # Get accrual period based on payment frequency
+                accrual_period = get_accrual_period(getattr(derivative, 'fixed_payment_frequency', 'Annually'))
+                
+                # Calculate fixed and floating payments
+                fixed_payment = fixed_rate * notional * accrual_period
+                floating_payment = floating_rate * notional * accrual_period
+                
+                # Calculate discount factor for this specific payment
                 discount_rate = interpolate_rate(curve, days_to_maturity)
                 discount_factor = 1 / (1 + discount_rate * (days_to_maturity / 365))
-                pv = total_cashflow * discount_factor
-                cashflow_ladder_records.append(CashflowLadderCreate(
-                    scenario=scenario_name,
-                    instrument_id=str(derivative.id),
-                    instrument_type=derivative.type,
-                    asset_liability="L",
-                    cashflow_date=cf_date,
-                    time_months=months,
-                    fixed_component=fixed_component,
-                    floating_component=floating_component,
-                    total_cashflow=total_cashflow,
-                    discount_factor=discount_factor,
-                    pv=pv
-                ))
+                
+                # Calculate PV of each component
+                fixed_pv = fixed_payment * discount_factor
+                floating_pv = floating_payment * discount_factor
+                
+                # Determine asset/liability based on swap type
+                if derivative.subtype == "Receiver Swap":
+                    # Fixed leg is asset, floating leg is liability
+                    # Asset (Fixed)
+                    cashflow_ladder_records.append(CashflowLadderCreate(
+                        scenario=scenario_name,
+                        instrument_id=str(derivative.id) + "_fixed",
+                        instrument_type=derivative.type + " (Fixed)",
+                        asset_liability="A",
+                        cashflow_date=cf_date,
+                        time_months=months,
+                        fixed_component=fixed_payment,
+                        floating_component=0.0,
+                        total_cashflow=fixed_payment,
+                        discount_factor=discount_factor,
+                        pv=fixed_pv
+                    ))
+                    # Liability (Floating)
+                    cashflow_ladder_records.append(CashflowLadderCreate(
+                        scenario=scenario_name,
+                        instrument_id=str(derivative.id) + "_floating",
+                        instrument_type=derivative.type + " (Floating)",
+                        asset_liability="L",
+                        cashflow_date=cf_date,
+                        time_months=months,
+                        fixed_component=0.0,
+                        floating_component=floating_payment,
+                        total_cashflow=floating_payment,
+                        discount_factor=discount_factor,
+                        pv=floating_pv
+                    ))
+                elif derivative.subtype == "Payer Swap":
+                    # Fixed leg is liability, floating leg is asset
+                    # Liability (Fixed)
+                    cashflow_ladder_records.append(CashflowLadderCreate(
+                        scenario=scenario_name,
+                        instrument_id=str(derivative.id) + "_fixed",
+                        instrument_type=derivative.type + " (Fixed)",
+                        asset_liability="L",
+                        cashflow_date=cf_date,
+                        time_months=months,
+                        fixed_component=fixed_payment,
+                        floating_component=0.0,
+                        total_cashflow=fixed_payment,
+                        discount_factor=discount_factor,
+                        pv=fixed_pv
+                    ))
+                    # Asset (Floating)
+                    cashflow_ladder_records.append(CashflowLadderCreate(
+                        scenario=scenario_name,
+                        instrument_id=str(derivative.id) + "_floating",
+                        instrument_type=derivative.type + " (Floating)",
+                        asset_liability="A",
+                        cashflow_date=cf_date,
+                        time_months=months,
+                        fixed_component=0.0,
+                        floating_component=floating_payment,
+                        total_cashflow=floating_payment,
+                        discount_factor=discount_factor,
+                        pv=floating_pv
+                    ))
+                else:
+                    # For other derivative types, treat as single net position
+                    cashflow_ladder_records.append(CashflowLadderCreate(
+                        scenario=scenario_name,
+                        instrument_id=str(derivative.id),
+                        instrument_type=derivative.type,
+                        asset_liability="A",  # Default to asset
+                        cashflow_date=cf_date,
+                        time_months=months,
+                        fixed_component=0.0,
+                        floating_component=cf_amount,
+                        total_cashflow=cf_amount,
+                        discount_factor=discount_factor,
+                        pv=cf_amount * discount_factor
+                    ))
     save_cashflow_ladder(db, cashflow_ladder_records)
 
     return schemas.DashboardData(
