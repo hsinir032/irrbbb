@@ -1390,6 +1390,10 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 else:
                     fixed_component = 0.0
                     floating_component = cf_amount
+                # Ensure both components are negative for liabilities
+                if deposit.type in ["CD", "Wholesale Funding", "Checking", "Savings"]:
+                    fixed_component = -abs(fixed_component)
+                    floating_component = -abs(floating_component)
                 total_cashflow = fixed_component + floating_component
                 discount_rate = interpolate_rate(curve, days_to_maturity)
                 discount_factor = 1 / (1 + discount_rate * (days_to_maturity / 365))
