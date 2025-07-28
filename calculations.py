@@ -835,7 +835,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                     scenario=scenario_name,
                     instrument_id=str(derivative.id) + "_floating",
                     instrument_type="Derivative (Floating Liability)",
-                    base_pv=abs(floating_pv),
+                    base_pv=-abs(floating_pv),  # Negative for liability
                     shocked_pv=None,
                     duration=floating_duration
                 ))
@@ -845,7 +845,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                     scenario=scenario_name,
                     instrument_id=str(derivative.id) + "_fixed",
                     instrument_type="Derivative (Fixed Liability)",
-                    base_pv=abs(fixed_pv),
+                    base_pv=-abs(fixed_pv),  # Negative for liability
                     shocked_pv=None,
                     duration=fixed_duration
                 ))
@@ -945,20 +945,16 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         # Derivatives
         for derivative in derivatives:
             if derivative.start_date <= today and derivative.end_date > today:
-                fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
-                floating_rate_for_nii = interpolate_rate(curve, 365) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
-
-                # Calculate fixed and floating NII contributions
-                fixed_nii = fixed_rate * derivative.notional
-                floating_nii = floating_rate_for_nii * derivative.notional
-
-                if (derivative.end_date - today).days > 0:
-                    proration_factor = min(1.0, (min(derivative.end_date, today + timedelta(days=NII_HORIZON_DAYS)) - today).days / 365.0)
-                    fixed_nii_contribution = fixed_nii * proration_factor
-                    floating_nii_contribution = floating_nii * proration_factor
-                else:
-                    fixed_nii_contribution = 0
-                    floating_nii_contribution = 0
+                # Generate separate cashflows for NII calculation (consistent with main NII calculation)
+                fixed_cfs = generate_fixed_leg_cashflows(derivative, curve, today)
+                floating_cfs = generate_floating_leg_cashflows(derivative, curve, today)
+                
+                # Calculate NII from cashflows within the horizon
+                nii_horizon_date = today + timedelta(days=NII_HORIZON_DAYS)
+                fixed_nii_contribution = sum(cf_amount for cf_date, cf_amount in fixed_cfs 
+                                           if today < cf_date <= nii_horizon_date)
+                floating_nii_contribution = sum(cf_amount for cf_date, cf_amount in floating_cfs 
+                                              if today < cf_date <= nii_horizon_date)
             else:
                 fixed_nii_contribution = 0
                 floating_nii_contribution = 0
