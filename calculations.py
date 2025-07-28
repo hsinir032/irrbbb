@@ -262,45 +262,7 @@ def generate_deposit_cashflows(deposit: models.Deposit, yield_curve: Dict[str, f
 
 
 
-def generate_derivative_cashflows(derivative: models.Derivative, yield_curve: Dict[str, float], today: date) -> List[Tuple[date, float]]:
-    """
-    Generates projected cash flows for a derivative (interest rate swap).
-    Returns a list of (date, amount) tuples.
-    """
-    if derivative.start_date > today or derivative.end_date < today:
-        return []  # Swap hasn't started or has ended
-    
-    cashflows = []
-    fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
-    
-    # Generate cash flows for each payment period
-    # Start from the next payment date after today
-    payment_date = derivative.start_date
-    # If the start date is in the past, find the next payment date
-    while payment_date <= today:
-        payment_date += timedelta(days=365)  # Move to next year
-    
-    while payment_date <= derivative.end_date and payment_date > today:
-        # Calculate floating rate for this period
-        days_to_payment = (payment_date - today).days
-        if days_to_payment <= 0:
-            payment_date += timedelta(days=365)  # Move to next year
-            continue
-            
-        floating_rate = interpolate_rate(yield_curve, days_to_payment) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
-        
-        # Calculate net payment
-        if derivative.subtype == "Payer Swap":
-            net_payment = (floating_rate - fixed_rate) * derivative.notional
-        elif derivative.subtype == "Receiver Swap":
-            net_payment = (fixed_rate - floating_rate) * derivative.notional
-        else:
-            net_payment = 0
-        
-        cashflows.append((payment_date, net_payment))
-        payment_date += timedelta(days=365)  # Annual payments
-    
-    return cashflows
+
 
 
 def get_bucket(item_date: date, today: date, buckets: Dict[str, int]) -> str:
@@ -362,27 +324,38 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
             if today < cf_date <= nii_horizon_date:
                 total_nii_expense += abs(cf_amount)
 
+    # Calculate derivative NII using separate leg cashflows
     for derivative in derivatives:
-        if derivative.type == "Interest Rate Swap" and derivative.start_date <= today and  derivative.end_date > today:
-            fixed_rate = derivative.fixed_rate if derivative.fixed_rate is not None else 0
-            floating_rate_for_nii = interpolate_rate(yield_curve, 365) + (derivative.floating_spread if derivative.floating_spread is not None else 0)
-
+        if derivative.start_date <= today and derivative.end_date > today:
+            # Generate separate cashflows for NII calculation
+            fixed_cfs = generate_fixed_leg_cashflows(derivative, yield_curve, today)
+            floating_cfs = generate_floating_leg_cashflows(derivative, yield_curve, today)
+            
+            # Calculate NII from cashflows within the horizon
+            fixed_nii = sum(cf_amount for cf_date, cf_amount in fixed_cfs 
+                           if today < cf_date <= nii_horizon_date)
+            floating_nii = sum(cf_amount for cf_date, cf_amount in floating_cfs 
+                              if today < cf_date <= nii_horizon_date)
+            
+            # Add to income/expense based on swap type
             if derivative.subtype == "Payer Swap":
-                net_annual_interest = (floating_rate_for_nii - fixed_rate) * derivative.notional
+                # Payer Swap: Pay fixed (expense), receive floating (income)
+                total_nii_expense += abs(fixed_nii)
+                total_nii_income += abs(floating_nii)
             elif derivative.subtype == "Receiver Swap":
-                net_annual_interest = (fixed_rate - floating_rate_for_nii) * derivative.notional
+                # Receiver Swap: Receive fixed (income), pay floating (expense)
+                total_nii_income += abs(fixed_nii)
+                total_nii_expense += abs(floating_nii)
             else:
-                net_annual_interest = 0
+                # For other derivative types, treat as separate legs
+                total_nii_income += abs(fixed_nii)
+                total_nii_expense += abs(floating_nii)
 
-            if (derivative.end_date - today).days > 0:
-                proration_factor = min(1.0, (min(derivative.end_date, nii_horizon_date) - today).days / 365.0)
-                # For NII, we add to income if positive (asset), to expense if negative (liability)
-                if net_annual_interest > 0:
-                    total_nii_income += net_annual_interest * proration_factor
-                else:
-                    total_nii_expense += abs(net_annual_interest) * proration_factor
-
-    net_interest_income = total_nii_income - total_nii_expense
+    # Calculate NII using separate leg cashflows (consistent with NII drivers)
+    nii_from_separate_legs = total_nii_income - total_nii_expense
+    
+    # Also calculate using the old method for comparison (can be removed later)
+    net_interest_income = nii_from_separate_legs
 
     # --- EVE Calculation (Present Value of all future cash flows) ---
     total_pv_assets = 0.0
@@ -413,8 +386,7 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
     for derivative in derivatives:
         fixed_pv = calculate_fixed_leg_pv(derivative, yield_curve, today)
         floating_pv = calculate_floating_leg_pv(derivative, yield_curve, today)
-        net_pv = fixed_pv - floating_pv  # Fixed leg - Floating leg
-        print(f"Derivative {derivative.instrument_id} ({derivative.subtype}): Fixed PV = {fixed_pv:,.2f}, Floating PV = {floating_pv:,.2f}, Net PV = {net_pv:,.2f}")
+        print(f"Derivative {derivative.instrument_id} ({derivative.subtype}): Fixed PV = {fixed_pv:,.2f}, Floating PV = {floating_pv:,.2f}")
         # For EVE, we add the PV to the appropriate side based on swap type
         if derivative.subtype == "Receiver Swap":
             # Receiver Swap: We receive fixed (asset), pay floating (liability)
@@ -425,13 +397,15 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
             total_pv_assets += floating_pv
             total_pv_liabilities += fixed_pv
         else:
-            # For other swap types, treat as net position
-            total_pv_derivatives += net_pv
+            # For other swap types, treat as separate legs
+            total_pv_assets += fixed_pv
+            total_pv_liabilities += floating_pv
 
     eve_value = total_pv_assets - abs(total_pv_liabilities) + total_pv_derivatives
 
     return {
         "net_interest_income": net_interest_income,
+        "net_interest_income_from_separate_legs": net_interest_income,  # This is now calculated from separate legs
         "economic_value_of_equity": eve_value,
         "total_assets_value": total_pv_assets,
         "total_liabilities_value": abs(total_pv_liabilities),
@@ -634,11 +608,17 @@ def calculate_gap_analysis(db: Session) -> Dict[str, List[schemas.GapBucket]]:
         eve_gap_data[bucket_name]["liabilities"] += deposit.balance
 
     for derivative in derivatives:
-        bucket_name = get_bucket(derivative.end_date, today, eve_buckets_def)
+        # Split derivatives into fixed and floating legs
         if derivative.subtype == "Payer Swap":
-            eve_gap_data[bucket_name]["assets"] += derivative.notional
+            # Payer Swap: Fixed leg is liability, floating leg is asset
+            bucket_name = get_bucket(derivative.end_date, today, eve_buckets_def)
+            eve_gap_data[bucket_name]["liabilities"] += derivative.notional  # Fixed leg
+            eve_gap_data[bucket_name]["assets"] += derivative.notional       # Floating leg
         elif derivative.subtype == "Receiver Swap":
-            eve_gap_data[bucket_name]["liabilities"] += derivative.notional
+            # Receiver Swap: Fixed leg is asset, floating leg is liability
+            bucket_name = get_bucket(derivative.end_date, today, eve_buckets_def)
+            eve_gap_data[bucket_name]["assets"] += derivative.notional       # Fixed leg
+            eve_gap_data[bucket_name]["liabilities"] += derivative.notional  # Floating leg
 
     eve_gap_results = []
     for bucket in eve_bucket_order:
@@ -707,14 +687,17 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             scenario_name=scenario_name,
             eve_value=metrics_for_curve["economic_value_of_equity"]
         ))
+        
+        # Calculate NII from separate leg contributions (consistent with NII drivers)
+        nii_from_separate_legs = metrics_for_curve["net_interest_income_from_separate_legs"]
         nii_scenario_results.append(schemas.NIIScenarioResult(
             scenario_name=scenario_name,
-            nii_value=metrics_for_curve["net_interest_income"]
+            nii_value=nii_from_separate_legs
         ))
 
         if scenario_name == "Base Case":
             base_case_eve = metrics_for_curve["economic_value_of_equity"]
-            base_case_nii = metrics_for_curve["net_interest_income"]
+            base_case_nii = nii_from_separate_legs
             total_assets_value_base = metrics_for_curve["total_assets_value"]
             total_liabilities_value_base = metrics_for_curve["total_liabilities_value"]
             portfolio_value_base = total_assets_value_base + total_liabilities_value_base + metrics_for_curve["total_derivatives_value"]
@@ -814,17 +797,28 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
             if derivative.start_date > today or derivative.end_date < today:
                 continue
             
+            print(f"Processing derivative {derivative.instrument_id} for EVE drivers")
+            
             # Generate separate cashflows for fixed and floating legs for duration calculation
             fixed_cfs = generate_fixed_leg_cashflows(derivative, curve, today)
             floating_cfs = generate_floating_leg_cashflows(derivative, curve, today)
+            
+            print(f"  Fixed leg cashflows: {len(fixed_cfs)}")
+            print(f"  Floating leg cashflows: {len(floating_cfs)}")
             
             # Calculate PV of each leg using separate functions
             fixed_pv = calculate_fixed_leg_pv(derivative, curve, today)
             floating_pv = calculate_floating_leg_pv(derivative, curve, today)
             
+            print(f"  Fixed PV: {fixed_pv:,.2f}")
+            print(f"  Floating PV: {floating_pv:,.2f}")
+            
             # Calculate duration for each leg using separate cashflows
             fixed_duration = calculate_modified_duration(fixed_cfs, curve, today) if fixed_cfs else None
             floating_duration = calculate_modified_duration(floating_cfs, curve, today) if floating_cfs else None
+            
+            print(f"  Fixed duration: {fixed_duration}")
+            print(f"  Floating duration: {floating_duration}")
             
             # Create separate records for fixed and floating legs
             if derivative.subtype == "Receiver Swap":
@@ -864,16 +858,27 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                     duration=floating_duration
                 ))
             else:
-                # For other derivative types, treat as single net position
+                # For other derivative types, treat as separate legs
                 fixed_pv = calculate_fixed_leg_pv(derivative, curve, today)
                 floating_pv = calculate_floating_leg_pv(derivative, curve, today)
-                net_pv = fixed_pv - floating_pv
-                duration = calculate_modified_duration(derivative_cfs, curve, today)
+                # Use separate legs for duration calculation (consistent approach)
+                fixed_cfs = generate_fixed_leg_cashflows(derivative, curve, today)
+                floating_cfs = generate_floating_leg_cashflows(derivative, curve, today)
+                # Calculate weighted average duration
+                fixed_duration = calculate_modified_duration(fixed_cfs, curve, today) if fixed_cfs else None
+                floating_duration = calculate_modified_duration(floating_cfs, curve, today) if floating_cfs else None
+                # Use the leg with the larger PV for duration
+                if abs(fixed_pv) > abs(floating_pv):
+                    duration = fixed_duration
+                else:
+                    duration = floating_duration
+                # Use the larger PV for the record
+                base_pv = abs(fixed_pv) if abs(fixed_pv) > abs(floating_pv) else abs(floating_pv)
                 eve_driver_records.append(EveDriverCreate(
                     scenario=scenario_name,
                     instrument_id=str(derivative.id),
                     instrument_type=derivative.type,
-                    base_pv=abs(net_pv),
+                    base_pv=base_pv,
                     shocked_pv=None,
                     duration=duration
                 ))
@@ -969,12 +974,12 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
 
             # Create separate records for fixed and floating legs
             if derivative.subtype == "Receiver Swap":
-                # Fixed leg is asset, floating leg is liability
+                # Receiver Swap: Receive fixed (income), pay floating (expense)
                 nii_driver_records.append(NiiDriverCreate(
                     scenario=scenario_name,
                     instrument_id=str(derivative.id) + "_fixed",
                     instrument_type="Derivative (Fixed Asset)",
-                    nii_contribution=abs(fixed_nii_contribution),
+                    nii_contribution=fixed_nii_contribution,  # Positive (income)
                     breakdown_type=derivative.type,
                     breakdown_value=bucket
                 ))
@@ -982,17 +987,17 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                     scenario=scenario_name,
                     instrument_id=str(derivative.id) + "_floating",
                     instrument_type="Derivative (Floating Liability)",
-                    nii_contribution=abs(floating_nii_contribution),
+                    nii_contribution=-floating_nii_contribution,  # Negative (expense)
                     breakdown_type=derivative.type,
                     breakdown_value=bucket
                 ))
             elif derivative.subtype == "Payer Swap":
-                # Fixed leg is liability, floating leg is asset
+                # Payer Swap: Pay fixed (expense), receive floating (income)
                 nii_driver_records.append(NiiDriverCreate(
                     scenario=scenario_name,
                     instrument_id=str(derivative.id) + "_fixed",
                     instrument_type="Derivative (Fixed Liability)",
-                    nii_contribution=abs(fixed_nii_contribution),
+                    nii_contribution=-fixed_nii_contribution,  # Negative (expense)
                     breakdown_type=derivative.type,
                     breakdown_value=bucket
                 ))
@@ -1000,18 +1005,25 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                     scenario=scenario_name,
                     instrument_id=str(derivative.id) + "_floating",
                     instrument_type="Derivative (Floating Asset)",
-                    nii_contribution=abs(floating_nii_contribution),
+                    nii_contribution=floating_nii_contribution,  # Positive (income)
                     breakdown_type=derivative.type,
                     breakdown_value=bucket
                 ))
             else:
-                # For other derivative types, treat as single net position
-                net_nii_contribution = fixed_nii_contribution - floating_nii_contribution
+                # For other derivative types, treat as separate legs
                 nii_driver_records.append(NiiDriverCreate(
                     scenario=scenario_name,
-                    instrument_id=str(derivative.id),
-                    instrument_type=derivative.type,
-                    nii_contribution=abs(net_nii_contribution),
+                    instrument_id=str(derivative.id) + "_fixed",
+                    instrument_type="Derivative (Fixed)",
+                    nii_contribution=fixed_nii_contribution,  # Positive
+                    breakdown_type=derivative.type,
+                    breakdown_value=bucket
+                ))
+                nii_driver_records.append(NiiDriverCreate(
+                    scenario=scenario_name,
+                    instrument_id=str(derivative.id) + "_floating",
+                    instrument_type="Derivative (Floating)",
+                    nii_contribution=-floating_nii_contribution,  # Negative
                     breakdown_type=derivative.type,
                     breakdown_value=bucket
                 ))
@@ -1400,9 +1412,16 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                     pv=pv
                 ))
         for derivative in derivatives:
+            # Skip inactive derivatives
+            if derivative.start_date > today or derivative.end_date < today:
+                continue
+                
+            print(f"Processing derivative {derivative.instrument_id} for cashflow ladder")
             # Generate separate cashflows for fixed and floating legs
             fixed_cfs = generate_fixed_leg_cashflows(derivative, curve, today)
             floating_cfs = generate_floating_leg_cashflows(derivative, curve, today)
+            print(f"  Fixed leg cashflows: {len(fixed_cfs)}")
+            print(f"  Floating leg cashflows: {len(floating_cfs)}")
             
             # Process fixed leg cashflows
             for cf_date, cf_amount in fixed_cfs:
@@ -1450,11 +1469,11 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                         pv=fixed_pv
                     ))
                 else:
-                    # For other derivative types, treat as single net position
+                    # For other derivative types, treat as separate legs
                     cashflow_ladder_records.append(CashflowLadderCreate(
                         scenario=scenario_name,
-                        instrument_id=str(derivative.id),
-                        instrument_type=derivative.type,
+                        instrument_id=str(derivative.id) + "_fixed",
+                        instrument_type=derivative.type + " (Fixed)",
                         asset_liability="A",  # Default to asset
                         cashflow_date=cf_date,
                         time_months=months,
@@ -1511,11 +1530,11 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                         pv=floating_pv
                     ))
                 else:
-                    # For other derivative types, treat as single net position
+                    # For other derivative types, treat as separate legs
                     cashflow_ladder_records.append(CashflowLadderCreate(
                         scenario=scenario_name,
-                        instrument_id=str(derivative.id),
-                        instrument_type=derivative.type,
+                        instrument_id=str(derivative.id) + "_floating",
+                        instrument_type=derivative.type + " (Floating)",
                         asset_liability="A",  # Default to asset
                         cashflow_date=cf_date,
                         time_months=months,
