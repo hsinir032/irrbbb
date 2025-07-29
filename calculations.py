@@ -249,7 +249,6 @@ def generate_deposit_cashflows(deposit: models.Deposit, yield_curve: Dict[str, f
 
         while next_payment_date <= projection_end_date:
             interest_expense = current_balance * effective_rate * (pay_freq_days / 365.0)
-            print(f"DEBUG NMD INTEREST | Instrument: {deposit.instrument_id} | Date: {next_payment_date} | Balance: {current_balance} | Rate: {effective_rate} | Days: {pay_freq_days} | Interest: {interest_expense}")
             cashflows.append((next_payment_date, -interest_expense)) # Negative for expense
             next_payment_date += timedelta(days=pay_freq_days)
         
@@ -1381,6 +1380,7 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                 discount_rate = interpolate_rate(curve, days_to_maturity)
                 discount_factor = 1 / (1 + discount_rate * (days_to_maturity / 365))
                 pv = total_cashflow * discount_factor
+                print(f"DEBUG CASHFLOW LADDER | Instrument: {deposit.instrument_id} | Date: {cf_date} | Amount: {total_cashflow} | PV: {pv} | Discount: {discount_factor}")
                 cashflow_ladder_records.append(CashflowLadderCreate(
                     scenario=scenario_name,
                     instrument_id=str(deposit.id),
