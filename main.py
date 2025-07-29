@@ -358,14 +358,12 @@ def get_repricing_gap(scenario: str = "Base Case", db: Session = Depends(get_db)
 @app.get("/api/v1/repricing-gap/drill-down/{bucket}")
 def get_repricing_gap_drill_down(bucket: str, scenario: str = "Base Case", db: Session = Depends(get_db)):
     """Returns instrument-level drill-down data for a specific bucket."""
-    print(f"Drill-down requested for bucket: {bucket}, scenario: {scenario}")
     
     records = db.query(RepricingBucket).filter(
         RepricingBucket.scenario == scenario,
         RepricingBucket.bucket == bucket
     ).all()
     
-    print(f"Found {len(records)} records for bucket {bucket}")
     
     # Group by instrument type and position
     drill_down = {
@@ -389,7 +387,6 @@ def get_repricing_gap_drill_down(bucket: str, scenario: str = "Base Case", db: S
     drill_down["assets"].sort(key=lambda x: x["amount"], reverse=True)
     drill_down["liabilities"].sort(key=lambda x: x["amount"], reverse=True)
     
-    print(f"Returning drill-down data: {len(drill_down['assets'])} assets, {len(drill_down['liabilities'])} liabilities")
     
     return drill_down
 

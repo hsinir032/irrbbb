@@ -249,6 +249,7 @@ def generate_deposit_cashflows(deposit: models.Deposit, yield_curve: Dict[str, f
 
         while next_payment_date <= projection_end_date:
             interest_expense = current_balance * effective_rate * (pay_freq_days / 365.0)
+            print(f"DEBUG NMD INTEREST | Instrument: {deposit.instrument_id} | Date: {next_payment_date} | Balance: {current_balance} | Rate: {effective_rate} | Days: {pay_freq_days} | Interest: {interest_expense}")
             cashflows.append((next_payment_date, -interest_expense)) # Negative for expense
             next_payment_date += timedelta(days=pay_freq_days)
         
@@ -362,16 +363,13 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
     total_pv_liabilities = 0.0
     total_pv_derivatives = 0.0
 
-    print('--- EVE Asset PVs (Loans) ---')
     for loan in loans:
         if loan.type == "Cash":
             continue
         loan_cfs = generate_loan_cashflows(loan, yield_curve, today, include_principal=True, prepayment_rate=prepayment_rate)
         pv = calculate_pv_of_cashflows(loan_cfs, yield_curve, today)
-        print(f"Loan {loan.instrument_id} ({loan.type}): PV = {pv:,.2f}")
         total_pv_assets += pv
 
-    print('--- EVE Liability PVs (Deposits) ---')
     for deposit in deposits:
         if deposit.type == "Equity":
             continue
@@ -379,27 +377,12 @@ def calculate_nii_and_eve_for_curve(db_session: Session, yield_curve: Dict[str, 
                                                  nmd_effective_maturity_years=nmd_effective_maturity_years,
                                                  nmd_deposit_beta=nmd_deposit_beta)
         pv = calculate_pv_of_cashflows(deposit_cfs, yield_curve, today)
-        print(f"Deposit {deposit.instrument_id} ({deposit.type}): PV = {pv:,.2f}")
         total_pv_liabilities += pv
 
-    print('--- EVE Derivative PVs (All Derivatives) ---')
     for derivative in derivatives:
         fixed_pv = calculate_fixed_leg_pv(derivative, yield_curve, today)
         floating_pv = calculate_floating_leg_pv(derivative, yield_curve, today)
-        print(f"Derivative {derivative.instrument_id} ({derivative.subtype}): Fixed PV = {fixed_pv:,.2f}, Floating PV = {floating_pv:,.2f}")
-        # For EVE, we add the PV to the appropriate side based on swap type
-        if derivative.subtype == "Receiver Swap":
-            # Receiver Swap: We receive fixed (asset), pay floating (liability)
-            total_pv_assets += fixed_pv
-            total_pv_liabilities += -floating_pv  # Negative for liability
-        elif derivative.subtype == "Payer Swap":
-            # Payer Swap: We pay fixed (liability), receive floating (asset)
-            total_pv_assets += floating_pv
-            total_pv_liabilities += -fixed_pv  # Negative for liability
-        else:
-            # For other swap types, treat as separate legs
-            total_pv_assets += fixed_pv
-            total_pv_liabilities += -floating_pv  # Negative for liability
+        total_pv_derivatives += fixed_pv + floating_pv
 
     eve_value = total_pv_assets - abs(total_pv_liabilities) + total_pv_derivatives
 
