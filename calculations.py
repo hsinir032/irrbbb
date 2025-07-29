@@ -903,10 +903,12 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
         for deposit in deposits:
             if deposit.type == "Equity":
                 continue
-            deposit_cfs = generate_deposit_cashflows(deposit, curve, today, include_principal=False,
-                                                 nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
-                                                 nmd_deposit_beta=assumptions.nmd_deposit_beta)
-            nii_contribution = -sum(abs(cf_amount) for cf_date, cf_amount in deposit_cfs if today < cf_date <= today + timedelta(days=NII_HORIZON_DAYS))
+            # For NMDs, don't include principal in cashflow ladder (only interest)
+            include_principal_for_ladder = deposit.type not in ["Checking", "Savings"]
+            cfs = generate_deposit_cashflows(deposit, curve, today, include_principal=include_principal_for_ladder,
+                                             nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
+                                             nmd_deposit_beta=assumptions.nmd_deposit_beta)
+            nii_contribution = -sum(abs(cf_amount) for cf_date, cf_amount in cfs if today < cf_date <= today + timedelta(days=NII_HORIZON_DAYS))
             bucket = get_bucket(deposit.next_repricing_date if deposit.next_repricing_date else deposit.maturity_date, today, {
                 "0-3 Months": 90,
                 "3-6 Months": 180,
@@ -1353,7 +1355,9 @@ def generate_dashboard_data_from_db(db: Session, assumptions: schemas.Calculatio
                     pv=pv
                 ))
         for deposit in deposits:
-            cfs = generate_deposit_cashflows(deposit, curve, today, include_principal=True,
+            # For NMDs, don't include principal in cashflow ladder (only interest)
+            include_principal_for_ladder = deposit.type not in ["Checking", "Savings"]
+            cfs = generate_deposit_cashflows(deposit, curve, today, include_principal=include_principal_for_ladder,
                                              nmd_effective_maturity_years=assumptions.nmd_effective_maturity_years,
                                              nmd_deposit_beta=assumptions.nmd_deposit_beta)
             for cf_date, cf_amount in cfs:
